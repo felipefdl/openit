@@ -5,17 +5,41 @@
 
 # OpenIt
 
-Read a file and make a small correction immediately, without opening a workspace.
+A half-bounce app: the window is up before the Dock icon finishes its first bounce. Open a file, change one line, save, close.
 
-OpenIt is a native desktop viewer first and a focused single-file editor when needed: Markdown preview with an editor one keystroke away, text and code editing with syntax highlighting, PDF and image viewing, one window per file. Built in Rust on GPUI.
+You want to flip a value in a config file or read a README. The choices are a Preview that cannot edit, or an IDE that loads a workspace, a file tree, and an extensions marketplace before it shows you the file. OpenIt is the native app for the in-between: a viewer first, an editor one keystroke away, and no wait either way.
 
-## Status
+One file per window. No project, no sidebar, no language server booting in the background.
 
-Early development. The product contract is `VISION.md`; the design is `docs/specs/application-architecture.md`.
+## Fast where it counts
 
-Working today: Markdown preview and editing, text and code editing with syntax highlighting, JSON Schema validation for JSON, JSONC, and JSON5, image and SVG viewing with rotation and export, PDF reading with search, selection, and one-click Markdown generation, files with no reader handed to the system's default application, a save-or-discard prompt on quit with drafts that survive a crash, external-change detection, opt-in autosave, image permissions for Markdown, bundled and user color themes (Cmd+K Cmd+T), an application-drawn title bar, status-bar pickers for language, schema, and go-to-line, and the `openit` command, which hands paths to the running instance or starts one and returns at once. Quick Look is still ahead.
+Cold start opens straight to the document. Scrolling and mode switches do not stutter. Pick a sibling file from the same folder (click the file name, or Cmd/Ctrl+P) and the window stays put while the document changes.
 
-## Downloads
+The `openit` command hands paths to the running app, or starts one, and returns at once. `oi` is the short name.
+
+Rust on GPUI. Native on macOS, Windows, and Linux.
+
+## Config files
+
+Text and code open in the editor: syntax highlighting, find and replace, go to line, multicursor. JSON, JSONC, and JSON5 get schema errors inline, without a language server. Those errors do not block save.
+
+Save is explicit. Autosave is opt-in. Quit asks Save, Discard, or Cancel. A crash returns the draft on relaunch and never writes over the original file.
+
+## Markdown
+
+Markdown opens in preview, rendered as soon as the window is. When a heading or a link is wrong, switch to the editor in the same window and fix it. Reading position and editor state survive the switch.
+
+Remote images and schemas stay off until you allow the domain.
+
+## Also opens
+
+PDFs scroll, zoom, and search. Select and copy the text on the page. One click writes a Markdown version next to the file, figures included.
+
+Images rotate, flip, and export. SVG too.
+
+A type OpenIt cannot read still opens: the path goes to the system default instead of a window that only knows how to refuse.
+
+## Install
 
 Installers are on [GitHub Releases](https://github.com/felipefdl/openit/releases):
 
@@ -23,19 +47,19 @@ Installers are on [GitHub Releases](https://github.com/felipefdl/openit/releases
 - Linux x86_64: `.deb` and AppImage
 - Windows x86_64: NSIS installer (`-setup.exe`)
 
-The AppImage does not ship `openit` or `oi`; those commands are symlinked by hand.
+The AppImage does not ship `openit` or `oi`. Symlink those by hand.
 
 ## Build
 
 Requires Rust 1.98.1 or newer and [`just`](https://github.com/casey/just).
 
 ```sh
-just check   # format, lint, tests, dependency audit
-cargo run -p openit -- path/to/file.md   # binary is named OpenIt
-just package # cargo packager --release (pass --formats to pick dmg, deb, appimage, nsis)
+just check
+cargo run -p openit -- path/to/file.md
+just package
 ```
 
-Cut a tagged release with `just release <version>` (bumps the workspace version, commits, tags; does not push). Push the tag, then review the draft GitHub release.
+The binary is named `OpenIt`. `just package` builds a release installer; pass `--formats` to pick `dmg`, `deb`, `appimage`, or `nsis`.
 
 ## License
 
