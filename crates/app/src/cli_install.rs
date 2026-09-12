@@ -578,6 +578,11 @@ mod tests {
     assert!(section.contains("openit.cmd"));
     assert!(section.contains("oi.cmd"));
     assert!(section.contains("HKCU \"Environment\" \"Path\""));
+    assert!(section.contains("IntFmt"));
+    assert!(
+      !section.contains(r"$\\n"),
+      r"cargo-packager turns $\n into a real newline and breaks the NSI string"
+    );
   }
 
   #[test]

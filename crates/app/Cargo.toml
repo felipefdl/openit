@@ -82,10 +82,17 @@ ${UnStrLoc}
 Section CLI
   CreateDirectory "$INSTDIR\\bin"
   FileOpen $0 "$INSTDIR\\bin\\openit.cmd" w
-  FileWrite $0 "@echo off$\\r$\\n$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r$\\n"
+  IntFmt $9 "%c" 10
+  FileWrite $0 "@echo off$\\r"
+  FileWrite $0 $9
+  FileWrite $0 "$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r"
+  FileWrite $0 $9
   FileClose $0
   FileOpen $0 "$INSTDIR\\bin\\oi.cmd" w
-  FileWrite $0 "@echo off$\\r$\\n$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r$\\n"
+  FileWrite $0 "@echo off$\\r"
+  FileWrite $0 $9
+  FileWrite $0 "$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r"
+  FileWrite $0 $9
   FileClose $0
   ReadRegStr $0 HKCU "Environment" "Path"
   StrCpy $1 "$0;"
