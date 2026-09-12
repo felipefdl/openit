@@ -58,7 +58,7 @@ pub struct FontSettings {
   pub code: Option<String>,
 }
 
-fn font_is_unset(font: &FontSettings) -> bool {
+const fn font_is_unset(font: &FontSettings) -> bool {
   font.ui.is_none() && font.code.is_none()
 }
 

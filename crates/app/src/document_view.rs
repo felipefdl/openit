@@ -641,11 +641,11 @@ impl DocumentView {
     self.open_font_picker(FontSlot::Code, window, cx);
   }
   fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
-    if let Some(Overlay::Font(picker)) = &self.overlay {
-      if picker.read(cx).slot() == slot {
-        picker.update(cx, |picker, cx| picker.focus(window, cx));
-        return;
-      }
+    if let Some(Overlay::Font(picker)) = &self.overlay
+      && picker.read(cx).slot() == slot
+    {
+      picker.update(cx, |picker, cx| picker.focus(window, cx));
+      return;
     }
     match &self.overlay {
       Some(Overlay::Theme(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
@@ -1896,7 +1896,7 @@ pub(crate) mod tests {
 
     cx.update(|window, cx| {
       view.update(cx, |view, cx| {
-        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx)
+        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx);
       });
     });
     cx.run_until_parked();

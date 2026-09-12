@@ -315,10 +315,10 @@ mod tests {
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm(IndexPath::new(0), window, cx)));
     cx.run_until_parked();
-    let picked = names[0].clone();
+    let family = names[0].clone();
     cx.update(|_, cx| {
       let font = &cx.global::<AppSettings>().0.font;
-      assert_eq!(font.ui.as_deref(), Some(picked.as_str()));
+      assert_eq!(font.ui.as_deref(), Some(family.as_str()));
       assert_eq!(font.code.as_deref(), Some("KeepCode"));
     });
   }
@@ -334,11 +334,11 @@ mod tests {
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm(IndexPath::new(0), window, cx)));
     cx.run_until_parked();
-    let picked = names[0].clone();
+    let family = names[0].clone();
     cx.update(|_, cx| {
       let font = &cx.global::<AppSettings>().0.font;
       assert_eq!(font.ui.as_deref(), Some("KeepUi"));
-      assert_eq!(font.code.as_deref(), Some(picked.as_str()));
+      assert_eq!(font.code.as_deref(), Some(family.as_str()));
     });
   }
 

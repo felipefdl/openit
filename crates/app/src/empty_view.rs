@@ -295,7 +295,7 @@ mod tests {
     let (view, cx) = cx.add_window_view(EmptyView::new);
     cx.update(|window, cx| {
       view.update(cx, |view, cx| {
-        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx)
+        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx);
       });
     });
     cx.run_until_parked();
