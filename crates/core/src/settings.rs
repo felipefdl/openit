@@ -46,6 +46,22 @@ impl Default for ThemeSettings {
   }
 }
 
+/// Font families persisted in the user configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontSettings {
+  /// UI font family. Absent keeps the toolkit default.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ui: Option<String>,
+  /// Code font family. Absent keeps the toolkit default.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
+}
+
+fn font_is_unset(font: &FontSettings) -> bool {
+  font.ui.is_none() && font.code.is_none()
+}
+
 /// Preset widths for the centered Markdown preview column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +104,9 @@ pub struct Settings {
   /// Theme appearance mode and selected light and dark theme ids.
   #[serde(default)]
   pub theme: ThemeSettings,
+  /// UI and code font families. Absent keys keep the toolkit default.
+  #[serde(default, skip_serializing_if = "font_is_unset")]
+  pub font: FontSettings,
   /// Keep the status bar visible in Markdown preview, where it is hidden by default.
   #[serde(default)]
   pub always_show_status_bar: bool,
@@ -117,6 +136,7 @@ impl Default for Settings {
       allow_remote: false,
       allowed_domains: default_allowed_domains(),
       theme: ThemeSettings::default(),
+      font: FontSettings::default(),
       always_show_status_bar: false,
       markdown_preview_width: MarkdownPreviewWidth::default(),
       markdown_mode: MarkdownMode::default(),
@@ -208,7 +228,7 @@ impl Settings {
 mod tests {
   use std::fs;
 
-  use super::{Error, MAX_SETTINGS_BYTES, MarkdownMode, MarkdownPreviewWidth, Settings};
+  use super::{Error, FontSettings, MAX_SETTINGS_BYTES, MarkdownMode, MarkdownPreviewWidth, Settings};
 
   #[test]
   fn missing_file_is_the_default() {
@@ -273,6 +293,63 @@ mod tests {
     settings.save(&path).unwrap();
 
     assert_eq!(Settings::load(&path).unwrap(), settings);
+  }
+
+  #[test]
+  fn font_table_round_trips_both_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let settings = Settings {
+      font: FontSettings {
+        ui: Some("Inter".to_owned()),
+        code: Some("JetBrains Mono".to_owned()),
+      },
+      ..Settings::default()
+    };
+
+    settings.save(&path).unwrap();
+
+    let loaded = Settings::load(&path).unwrap();
+    assert_eq!(loaded.font.ui.as_deref(), Some("Inter"));
+    assert_eq!(loaded.font.code.as_deref(), Some("JetBrains Mono"));
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[font]"));
+    assert!(text.contains("ui = \"Inter\""));
+    assert!(text.contains("code = \"JetBrains Mono\""));
+  }
+
+  #[test]
+  fn omitting_the_font_table_keeps_toolkit_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, "autosave = true\n").unwrap();
+
+    let loaded = Settings::load(&path).unwrap();
+    assert_eq!(loaded.font, FontSettings::default());
+    assert!(loaded.font.ui.is_none());
+    assert!(loaded.font.code.is_none());
+  }
+
+  #[test]
+  fn omitting_a_font_key_keeps_that_slot_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, "[font]\nui = \"Inter\"\n").unwrap();
+
+    let loaded = Settings::load(&path).unwrap();
+    assert_eq!(loaded.font.ui.as_deref(), Some("Inter"));
+    assert!(loaded.font.code.is_none());
+  }
+
+  #[test]
+  fn unknown_font_family_is_kept_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, "[font]\nui = \"NotARealFont\"\ncode = \"AlsoFake\"\n").unwrap();
+
+    let loaded = Settings::load(&path).unwrap();
+    assert_eq!(loaded.font.ui.as_deref(), Some("NotARealFont"));
+    assert_eq!(loaded.font.code.as_deref(), Some("AlsoFake"));
   }
 
   #[test]
