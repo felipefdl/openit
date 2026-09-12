@@ -141,6 +141,7 @@ mod tests {
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(200));
+    while rx.try_recv().is_ok() {}
 
     fs::write(dir.path().join("b.txt"), "other").unwrap();
 
