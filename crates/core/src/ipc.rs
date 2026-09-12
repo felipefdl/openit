@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAX_REPLY_BYTES: u64 = 16;
@@ -324,7 +324,7 @@ mod tests {
     let start = Instant::now();
     let result = send_to(&test.name, std::iter::empty::<&std::path::Path>());
     assert_eq!(result, Err(NoInstance));
-    assert!(start.elapsed() <= Duration::from_secs(2));
+    assert!(start.elapsed() <= Duration::from_millis(500));
   }
 
   #[cfg(unix)]

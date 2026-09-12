@@ -73,13 +73,14 @@ pub fn decode_document(
   format: openit_core::document::ImageFormat,
   transform: Transform,
 ) -> Result<DocumentImage, String> {
-  let frames = openit_core::raster::decode_frames(bytes, format, MAX_ANIMATION_PIXELS).map_err(|e| e.to_string())?;
-  let has_alpha = frames_have_alpha(&frames);
+  let (frames, has_alpha) =
+    openit_core::raster::decode_frames(bytes, format, MAX_ANIMATION_PIXELS).map_err(|e| e.to_string())?;
   let mut prepared = Vec::with_capacity(frames.len());
   for frame in frames {
     let (left, top, delay) = (frame.left(), frame.top(), frame.delay());
-    let buffer = transformed(&image::DynamicImage::ImageRgba8(frame.into_buffer()), transform).into_rgba8();
-    prepared.push(Frame::from_parts(fit(buffer), left, top, delay));
+    let buffer = downscaled(frame.into_buffer());
+    let buffer = transformed(image::DynamicImage::ImageRgba8(buffer), transform).into_rgba8();
+    prepared.push(Frame::from_parts(swap_to_bgra(buffer), left, top, delay));
   }
   if prepared.is_empty() {
     return Err("the image has no frames".to_owned());
@@ -90,11 +91,33 @@ pub fn decode_document(
   })
 }
 
-/// Whether any frame carries a pixel that is not fully opaque.
-fn frames_have_alpha(frames: &[Frame]) -> bool {
-  frames
-    .iter()
-    .any(|frame| frame.buffer().pixels().any(|pixel| pixel.0[3] != u8::MAX))
+/// Apply `transform` to already-decoded display frames without rereading the file.
+pub fn apply_transform(image: &DocumentImage, transform: Transform) -> DocumentImage {
+  if transform.is_identity() {
+    return image.clone();
+  }
+  let count = image.render.frame_count();
+  let mut frames = Vec::with_capacity(count);
+  for index in 0..count {
+    let size = image.render.size(index);
+    let width = u32::try_from(size.width.0.max(0)).unwrap_or(0);
+    let height = u32::try_from(size.height.0.max(0)).unwrap_or(0);
+    let Some(bytes) = image.render.as_bytes(index) else {
+      continue;
+    };
+    let Some(buffer) = RgbaImage::from_raw(width, height, bytes.to_vec()) else {
+      continue;
+    };
+    let buffer = transformed(image::DynamicImage::ImageRgba8(buffer), transform).into_rgba8();
+    frames.push(Frame::from_parts(buffer, 0, 0, image.render.delay(index)));
+  }
+  if frames.is_empty() {
+    return image.clone();
+  }
+  DocumentImage {
+    render: to_render_image(frames),
+    has_alpha: image.has_alpha,
+  }
 }
 
 fn decode_raster(format: image::ImageFormat, bytes: &[u8]) -> Option<image::ImageResult<Vec<Frame>>> {
@@ -172,7 +195,10 @@ fn animated_frames<'a, D: AnimationDecoder<'a>>(decoder: D, budget_pixels: u64) 
 
 /// Downscale to the edge limit, then swap RGBA channels to GPUI's BGRA order.
 pub fn fit(buffer: RgbaImage) -> RgbaImage {
-  let mut buffer = downscaled(buffer);
+  swap_to_bgra(downscaled(buffer))
+}
+
+fn swap_to_bgra(mut buffer: RgbaImage) -> RgbaImage {
   for pixel in buffer.pixels_mut() {
     pixel.0.swap(0, 2);
   }

@@ -83,6 +83,7 @@ The session increments a revision on every `InputEvent::Change`. A snapshot is t
 
 - Quit asks each dirty document in turn: Save, Discard, or Cancel. Cancel stops the quit and keeps every window. Discard deletes that document's recovery data, so nothing returns on relaunch. A pending save-then-close whose save fails keeps its window and stops the quit.
 - Explicitly closing a dirty document offers the same Save, Discard, and Cancel.
+- Closing the last window quits on Linux and Windows through the same quit path as Cmd/Ctrl+Q, unless an open is still in flight. On macOS the app stays resident with no windows so Dock reopen can show an empty one.
 
 ### External changes
 
@@ -400,3 +401,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-09-11: Nearby files: a transient picker over the open document's directory replaces the document in the same window; the title bar file name, Cmd/Ctrl+P, and File > Go to File... open it. Details in [Nearby files](nearby-files.md).
 - 2026-09-11: Open requests: the app binary is the `openit` command, one running instance owns every request, and an empty launch shows a window. Details in [Open requests](open-requests.md).
 - 2026-09-11: Configuration validation points at [Schema validation](schema-validation.md): quiet status name, schema completions, and fetch failure as a log line only.
+- 2026-09-12: Closing the last window quits on Linux and Windows through the existing quit path, unless an open is still in flight. macOS stays resident with no windows so Dock reopen can show an empty one.

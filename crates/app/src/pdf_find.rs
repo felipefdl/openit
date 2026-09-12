@@ -1,10 +1,14 @@
 //! The PDF find bar: a query field, a match count, and the results list.
 
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::Duration;
+
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::{FluentBuilder as _, InteractiveElement as _, StatefulInteractiveElement as _};
 use gpui_kit::{
   AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString, Styled,
-  Subscription, Window, div, px,
+  Subscription, Task, Window, div, px,
 };
 use openit_core::pdf_text::Match;
 
@@ -12,6 +16,8 @@ use crate::theme::{ActivePalette, hsla};
 
 /// Rows of the results list shown at once before it scrolls.
 const MAX_RESULT_ROWS: usize = 8;
+/// How long after the last keystroke the query is searched.
+const DEBOUNCE_MS: u64 = 100;
 
 /// What the find bar decided.
 pub enum FindBarEvent {
@@ -26,8 +32,9 @@ pub enum FindBarEvent {
 /// The bar over the pages: query, count, and one row per match.
 pub struct FindBar {
   input: Entity<InputState>,
-  matches: Vec<Match>,
+  matches: Arc<[Match]>,
   current: Option<usize>,
+  query_task: Option<Task<()>>,
   _subscription: Subscription,
 }
 
@@ -38,18 +45,22 @@ impl FindBar {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
     input.update(cx, |state, cx| state.focus(window, cx));
-    let subscription = cx.subscribe(&input, |_: &mut Self, input, event: &InputEvent, cx| match event {
+    let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
       InputEvent::Change => {
         let query = input.read(cx).value().to_string();
-        cx.emit(FindBarEvent::QueryChanged(query));
+        this.query_task = Some(cx.spawn(async move |this, cx| {
+          cx.background_executor().timer(Duration::from_millis(DEBOUNCE_MS)).await;
+          let _ = this.update(cx, |_, cx| cx.emit(FindBarEvent::QueryChanged(query)));
+        }));
       },
       // Enter is bound to NextMatch on this key context, so the field ignores it.
       InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {},
     });
     Self {
       input,
-      matches: Vec::new(),
+      matches: Arc::from([]),
       current: None,
+      query_task: None,
       _subscription: subscription,
     }
   }
@@ -65,7 +76,7 @@ impl FindBar {
   }
 
   /// Replace the results and the current match.
-  pub fn set_results(&mut self, matches: Vec<Match>, current: Option<usize>, cx: &mut Context<Self>) {
+  pub fn set_results(&mut self, matches: Arc<[Match]>, current: Option<usize>, cx: &mut Context<Self>) {
     self.matches = matches;
     self.current = current;
     cx.notify();
@@ -94,10 +105,9 @@ impl Render for FindBar {
     let border = hsla(palette.border);
     let muted = hsla(palette.muted_foreground);
     let current = self.current;
-    let rows: Vec<_> = self
-      .matches
-      .iter()
-      .enumerate()
+    let range = visible_row_range(self.matches.len(), current);
+    let rows: Vec<_> = range
+      .filter_map(|index| self.matches.get(index).map(|hit| (index, hit)))
       .map(|(index, hit)| {
         let selected = current == Some(index);
         div()
@@ -124,7 +134,7 @@ impl Render for FindBar {
               .overflow_hidden()
               .text_ellipsis()
               .whitespace_nowrap()
-              .child(hit.context.clone()),
+              .child(SharedString::from(hit.context.as_str())),
           )
           .on_click(cx.listener(move |_, _, _, cx| cx.emit(FindBarEvent::Pick(index))))
       })
@@ -186,6 +196,17 @@ impl Render for FindBar {
 /// How many rows the list shows before it scrolls.
 fn row_count(rows: usize) -> f32 {
   f32::from(u16::try_from(rows.min(MAX_RESULT_ROWS)).unwrap_or(u16::MAX))
+}
+
+/// The slice of matches drawn in the results list, clustered on the current hit.
+fn visible_row_range(total: usize, current: Option<usize>) -> Range<usize> {
+  if total <= MAX_RESULT_ROWS {
+    return 0..total;
+  }
+  let current = current.unwrap_or(0).min(total.saturating_sub(1));
+  let before = MAX_RESULT_ROWS.saturating_sub(1) / 2;
+  let start = current.saturating_sub(before).min(total.saturating_sub(MAX_RESULT_ROWS));
+  start..start.saturating_add(MAX_RESULT_ROWS).min(total)
 }
 
 #[cfg(test)]

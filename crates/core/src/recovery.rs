@@ -1,12 +1,15 @@
-//! Drafts of unsaved work. One JSON file per session under the OpenIt data
-//! directory, plus a blob file holding an image draft's pixels; the original
-//! document is never touched from here.
+//! Drafts of unsaved work.
+//!
+//! One JSON metadata file per session under the OpenIt data directory, a sidecar
+//! `.txt` for buffer text, and a `.blob` for image pixels; the original document is
+//! never touched from here.
 
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use ropey::Rope;
 use serde::{Deserialize, Serialize};
 
 use crate::document::ImageFormat;
@@ -30,7 +33,11 @@ pub struct Draft {
   /// Fingerprint of the source file when this draft was captured, or `None` for an untitled document.
   #[serde(default)]
   pub disk: Option<Fingerprint>,
-  /// Full buffer text at checkpoint time; empty for an image document.
+  /// Full buffer text at restore time; empty for an image document.
+  ///
+  /// Written to a `<session>.txt` sidecar, not this JSON. Older drafts that
+  /// inlined the buffer still deserialize here.
+  #[serde(default, skip_serializing)]
   pub text: String,
   /// Caret position as a UTF-8 byte offset into `text`.
   #[serde(default)]
@@ -81,6 +88,10 @@ impl RecoveryStore {
     self.dir.join(format!("{session}.blob"))
   }
 
+  fn text_for(&self, session: SessionId) -> PathBuf {
+    self.dir.join(format!("{session}.txt"))
+  }
+
   /// Write the image bytes belonging to `session`, replacing any earlier blob.
   pub fn write_blob(&self, session: SessionId, bytes: &[u8]) -> Result<(), Error> {
     let path = self.blob_for(session);
@@ -94,21 +105,49 @@ impl RecoveryStore {
 
   /// Read the image bytes belonging to `session`.
   pub fn read_blob(&self, session: SessionId) -> Result<Vec<u8>, Error> {
-    let path = self.blob_for(session);
-    let file = fs::File::open(&path).map_err(|source| Error::Recovery { path: path.clone(), source })?;
-    let mut bytes = Vec::new();
-    file
-      .take(MAX_DRAFT_BYTES + 1)
-      .read_to_end(&mut bytes)
-      .map_err(|source| Error::Recovery { path: path.clone(), source })?;
+    read_limited(&self.blob_for(session))
+  }
+
+  /// Write `draft` metadata. Text drafts also write `draft.text` to a sidecar.
+  pub fn checkpoint(&self, draft: &Draft) -> Result<(), Error> {
+    if draft.image.is_none() {
+      self.write_text_bytes(draft.session, draft.text.as_bytes())?;
+    }
+    self.write_meta(draft)
+  }
+
+  /// Write `draft` metadata and stream `text` to a sidecar `.txt` file.
+  pub fn checkpoint_text(&self, draft: &Draft, text: &Rope) -> Result<(), Error> {
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_DRAFT_BYTES {
+      return Err(oversized(self.text_for(draft.session)));
+    }
+    let path = self.text_for(draft.session);
+    write_atomic(
+      &path,
+      &self.dir,
+      |_| Ok(()),
+      |w| {
+        for chunk in text.chunks() {
+          w.write_all(chunk.as_bytes())?;
+        }
+        Ok(())
+      },
+    )
+    .map_err(|source| Error::Recovery { path, source })?;
+    self.write_meta(draft)
+  }
+
+  fn write_text_bytes(&self, session: SessionId, bytes: &[u8]) -> Result<(), Error> {
+    let path = self.text_for(session);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DRAFT_BYTES {
       return Err(oversized(path));
     }
-    Ok(bytes)
+    write_atomic(&path, &self.dir, |_| Ok(()), |w| w.write_all(bytes))
+      .map_err(|source| Error::Recovery { path, source })?;
+    Ok(())
   }
 
-  /// Write `draft`, replacing any earlier checkpoint for the same session.
-  pub fn checkpoint(&self, draft: &Draft) -> Result<(), Error> {
+  fn write_meta(&self, draft: &Draft) -> Result<(), Error> {
     let path = self.file_for(draft.session);
     let json = serde_json::to_vec(draft).map_err(|source| Error::DraftFormat { path: path.clone(), source })?;
     if u64::try_from(json.len()).unwrap_or(u64::MAX) > MAX_DRAFT_BYTES {
@@ -116,15 +155,19 @@ impl RecoveryStore {
     }
     write_atomic(&path, &self.dir, |_| Ok(()), |w| w.write_all(&json))
       .map_err(|source| Error::Recovery { path: path.clone(), source })?;
+    if draft.image.is_some() {
+      remove_file(self.text_for(draft.session))?;
+    }
     tracing::debug!(session = %draft.session, "checkpoint written");
     Ok(())
   }
 
-  /// Delete the draft for `session`, and its blob when it has one. A missing
+  /// Delete the draft for `session`, and its sidecar files when present. A missing
   /// file is not an error.
   pub fn remove(&self, session: SessionId) -> Result<(), Error> {
     remove_file(self.file_for(session))?;
-    remove_file(self.blob_for(session))
+    remove_file(self.blob_for(session))?;
+    remove_file(self.text_for(session))
   }
 
   /// Every readable draft, oldest checkpoint first. Unreadable files are
@@ -138,7 +181,7 @@ impl RecoveryStore {
       if path.extension().and_then(|e| e.to_str()) != Some("json") {
         continue;
       }
-      match read_draft(&path) {
+      match self.read(&path) {
         Ok(draft) if draft.image.is_some() && !self.blob_for(draft.session).is_file() => {
           tracing::warn!(session = %draft.session, "skipping an image draft whose pixels are missing");
         },
@@ -157,6 +200,25 @@ impl RecoveryStore {
     }
     drafts.sort_by_key(|(modified, _)| *modified);
     Ok(drafts.into_iter().map(|(_, d)| d).collect())
+  }
+
+  /// Read one draft metadata file and restore its text.
+  pub fn read(&self, path: &Path) -> Result<Draft, Error> {
+    let mut draft: Draft = serde_json::from_slice(&read_limited(path)?)
+      .map_err(|source| Error::DraftFormat { path: path.to_path_buf(), source })?;
+    if draft.image.is_none() {
+      match read_limited(&self.text_for(draft.session)) {
+        Ok(bytes) => {
+          draft.text = String::from_utf8(bytes).map_err(|_| Error::Recovery {
+            path: self.text_for(draft.session),
+            source: io::Error::new(io::ErrorKind::InvalidData, "draft text is not UTF-8"),
+          })?;
+        },
+        Err(Error::Recovery { source, .. }) if source.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error),
+      }
+    }
+    Ok(draft)
   }
 }
 
@@ -177,7 +239,7 @@ fn oversized(path: PathBuf) -> Error {
   }
 }
 
-fn read_draft(path: &Path) -> Result<Draft, Error> {
+fn read_limited(path: &Path) -> Result<Vec<u8>, Error> {
   let file = fs::File::open(path).map_err(|source| Error::Recovery { path: path.to_path_buf(), source })?;
   let metadata = file
     .metadata()
@@ -188,27 +250,27 @@ fn read_draft(path: &Path) -> Result<Draft, Error> {
       source: io::Error::new(io::ErrorKind::InvalidData, "draft is not a regular file"),
     });
   }
-
-  let mut bytes = Vec::new();
+  if metadata.len() > MAX_DRAFT_BYTES {
+    return Err(oversized(path.to_path_buf()));
+  }
+  let capacity = usize::try_from(metadata.len().min(MAX_DRAFT_BYTES)).unwrap_or(0);
+  let mut bytes = Vec::with_capacity(capacity);
   file
     .take(MAX_DRAFT_BYTES + 1)
     .read_to_end(&mut bytes)
     .map_err(|source| Error::Recovery { path: path.to_path_buf(), source })?;
-  let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-  if size > MAX_DRAFT_BYTES {
-    return Err(Error::Recovery {
-      path: path.to_path_buf(),
-      source: io::Error::new(io::ErrorKind::InvalidData, "draft exceeds size limit"),
-    });
+  if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DRAFT_BYTES {
+    return Err(oversized(path.to_path_buf()));
   }
-
-  serde_json::from_slice(&bytes).map_err(|source| Error::DraftFormat { path: path.to_path_buf(), source })
+  Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
   use std::fs;
   use std::path::{Path, PathBuf};
+
+  use ropey::Rope;
 
   use super::{Draft, ImageDraft, MAX_DRAFT_BYTES, RecoveryStore};
   use crate::document::ImageFormat;
@@ -284,7 +346,7 @@ mod tests {
   }
 
   #[test]
-  fn a_text_draft_written_before_images_still_parses() {
+  fn a_text_draft_written_before_sidecars_still_parses() {
     let dir = tempfile::tempdir().unwrap();
     let store = RecoveryStore::open(dir.path()).unwrap();
     let session = SessionId::new();
@@ -306,10 +368,7 @@ mod tests {
   fn a_schema_pick_round_trips_on_the_draft() {
     let dir = tempfile::tempdir().unwrap();
     let store = RecoveryStore::open(dir.path()).unwrap();
-    let mut d = draft(
-      "{}
-",
-    );
+    let mut d = draft("{}\n");
     d.schema = Some("https://www.schemastore.org/package.json".to_owned());
 
     store.checkpoint(&d).unwrap();
@@ -326,6 +385,27 @@ mod tests {
     store.checkpoint(&d).unwrap();
 
     assert_eq!(store.list().unwrap(), vec![d]);
+  }
+
+  #[test]
+  fn a_rope_checkpoint_round_trips_the_same_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RecoveryStore::open(dir.path()).unwrap();
+    let mut meta = draft("");
+    meta.cursor = 7;
+    let rope = Rope::from_str("chunked\ntext");
+
+    store.checkpoint_text(&meta, &rope).unwrap();
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].text, "chunked\ntext");
+    assert_eq!(listed[0].cursor, 7);
+    assert!(
+      !fs::read_to_string(dir.path().join(format!("{}.json", meta.session)))
+        .unwrap()
+        .contains("chunked")
+    );
   }
 
   #[test]
@@ -358,9 +438,10 @@ mod tests {
   fn checkpoint_refuses_an_oversized_draft() {
     let dir = tempfile::tempdir().unwrap();
     let store = RecoveryStore::open(dir.path()).unwrap();
-    let text = "x".repeat(usize::try_from(MAX_DRAFT_BYTES).unwrap());
+    let text = "x".repeat(usize::try_from(MAX_DRAFT_BYTES).unwrap() + 1);
     let d = draft(&text);
-    let path = dir.path().join(format!("{}.json", d.session));
+    let json_path = dir.path().join(format!("{}.json", d.session));
+    let text_path = dir.path().join(format!("{}.txt", d.session));
 
     let result = store.checkpoint(&d);
 
@@ -370,7 +451,8 @@ mod tests {
         if source.kind() == std::io::ErrorKind::InvalidData
           && source.to_string() == "draft exceeds size limit"
     ));
-    assert!(!path.exists());
+    assert!(!json_path.exists());
+    assert!(!text_path.exists());
   }
 
   #[test]
@@ -399,6 +481,8 @@ mod tests {
     store.remove(d.session).unwrap();
 
     assert!(store.list().unwrap().is_empty());
+    let leftover: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+    assert!(leftover.is_empty(), "{leftover:?}");
   }
 
   #[test]
@@ -418,12 +502,22 @@ mod tests {
     let store = RecoveryStore::open(dir.path()).unwrap();
     store.checkpoint(&draft("x")).unwrap();
 
-    let names: Vec<String> = fs::read_dir(dir.path())
+    let mut names: Vec<String> = fs::read_dir(dir.path())
       .unwrap()
       .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
       .collect();
-    assert_eq!(names.len(), 1);
-    assert_eq!(Path::new(&names[0]).extension().and_then(|ext| ext.to_str()), Some("json"));
+    names.sort();
+    assert_eq!(names.len(), 2);
+    assert!(
+      names
+        .iter()
+        .any(|name| Path::new(name).extension().and_then(|ext| ext.to_str()) == Some("json"))
+    );
+    assert!(
+      names
+        .iter()
+        .any(|name| Path::new(name).extension().and_then(|ext| ext.to_str()) == Some("txt"))
+    );
   }
 
   #[test]

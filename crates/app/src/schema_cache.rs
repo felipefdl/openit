@@ -3,14 +3,14 @@
 //! Local files and remote URLs go through `resolve`, `Fetcher`, `ResourceCache`,
 //! and `PermissionRequests`. `$ref` hops use that path up to [`schema::REF_DEPTH`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{FutureExt as _, future::Shared};
 use gpui_kit::{App, AppContext, Entity, Resource, Task, Window};
 use openit_core::resource::{self, Decision, DomainFamily, Resolved};
-use openit_core::schema::{self, JsonFamily, REF_DEPTH, SchemaDocuments};
+use openit_core::schema::{self, CompiledSchema, JsonFamily, ParsedJson, REF_DEPTH, SchemaDocuments};
 use openit_core::select::{self, SchemaSelection};
 use serde_json::Value;
 
@@ -26,6 +26,15 @@ pub struct DocumentSchemaCache {
   notifications: HashMap<SchemaKey, Task<()>>,
   selection: SchemaSelection,
   root: Option<SchemaKey>,
+  compiled: Option<Arc<CompiledSchema>>,
+  last_selection: Option<SelectionKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SelectionKey {
+  path: PathBuf,
+  schema: Option<String>,
+  manual: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -99,6 +108,8 @@ impl DocumentSchemaCache {
       notifications: HashMap::new(),
       selection: SchemaSelection::None,
       root: None,
+      compiled: None,
+      last_selection: None,
     })
   }
 
@@ -113,23 +124,54 @@ impl DocumentSchemaCache {
   }
 
   /// Select the document schema and load it, following `$ref` up to [`REF_DEPTH`].
-  pub fn load_document(&mut self, path: &Path, text: &str, manual: Option<&str>, window: &Window, cx: &mut App) {
+  ///
+  /// `parsed` is the instance document already parsed by the caller. Catalog
+  /// matching is skipped when `path`, `$schema`, and the manual pick are unchanged.
+  #[expect(
+    clippy::too_many_arguments,
+    reason = "one entry point for the parsed instance and its raw text"
+  )]
+  pub fn load_document(
+    &mut self,
+    path: &Path,
+    parsed: Option<&ParsedJson>,
+    text: &str,
+    manual: Option<&str>,
+    window: &Window,
+    cx: &mut App,
+  ) {
     let has_path = !path.as_os_str().is_empty();
     let family = if has_path {
       JsonFamily::from_path(path)
     } else {
       Some(JsonFamily::Json)
     };
-    let Some(family) = family else {
+    if family.is_none() {
       self.selection = SchemaSelection::None;
       self.root = None;
+      self.compiled = None;
+      self.last_selection = None;
       return;
+    }
+    let schema = parsed
+      .and_then(|parsed| parsed.value.get("$schema").and_then(Value::as_str))
+      .map(str::to_owned)
+      .or_else(|| schema::schema_keyword(text));
+    let key = SelectionKey {
+      path: path.to_path_buf(),
+      schema: schema.clone(),
+      manual: manual.map(str::to_owned),
     };
+    if self.last_selection.as_ref() == Some(&key) {
+      return;
+    }
+    self.last_selection = Some(key);
+    self.compiled = None;
     let path_opt = has_path.then_some(path);
-    let value = match schema::parse(family, text) {
-      Ok(parsed) => parsed.value,
-      Err(_) => schema::schema_keyword(text).map_or(Value::Null, |url| serde_json::json!({ "$schema": url })),
-    };
+    let value = parsed.map_or_else(
+      || schema.map_or(Value::Null, |url| serde_json::json!({ "$schema": url })),
+      |parsed| parsed.value.clone(),
+    );
     self.selection = select::select(path_opt, &value, manual);
     match self.selection.clone() {
       SchemaSelection::Local(schema_path) => {
@@ -144,6 +186,74 @@ impl DocumentSchemaCache {
       },
       SchemaSelection::Ask(_) | SchemaSelection::None | SchemaSelection::Denied(_) => {
         self.root = None;
+      },
+    }
+  }
+
+  /// Compile once per schema identity. Returns whether a `$ref` is still loading.
+  pub(crate) fn prepare_compiled(&mut self) -> bool {
+    match self.schema_state() {
+      SchemaDocs::Pending => true,
+      SchemaDocs::None => {
+        self.compiled = None;
+        false
+      },
+      SchemaDocs::Ready(_) => {
+        if self.compiled.is_none()
+          && let SchemaDocs::Ready(documents) = self.documents()
+        {
+          self.compiled = CompiledSchema::get_or_compile(None, &documents).ok().map(Arc::new);
+        }
+        false
+      },
+    }
+  }
+
+  /// The compiled validator for the current schema set, when ready.
+  pub(crate) fn compiled(&self) -> Option<Arc<CompiledSchema>> {
+    self.compiled.clone()
+  }
+
+  fn schema_state(&self) -> SchemaDocs {
+    let Some(root) = &self.root else {
+      return SchemaDocs::None;
+    };
+    match self.entries.get(root) {
+      Some(Entry::Loading { .. } | Entry::AwaitingPermission { .. }) => SchemaDocs::Pending,
+      Some(Entry::Failed) | None => SchemaDocs::None,
+      Some(Entry::Ready(_)) => {
+        let mut pending = false;
+        let mut seen = HashSet::new();
+        self.collect_state(root, &mut seen, &mut pending);
+        if pending {
+          SchemaDocs::Pending
+        } else {
+          SchemaDocs::Ready(SchemaDocuments {
+            root: schema_uri(root),
+            documents: BTreeMap::new(),
+          })
+        }
+      },
+    }
+  }
+
+  fn collect_state(&self, key: &SchemaKey, seen: &mut HashSet<String>, pending: &mut bool) {
+    let uri = schema_uri(key);
+    if !seen.insert(uri) {
+      return;
+    }
+    match self.entries.get(key) {
+      Some(Entry::Loading { .. } | Entry::AwaitingPermission { .. }) => *pending = true,
+      Some(Entry::Failed) | None => {},
+      Some(Entry::Ready(value)) => {
+        let base = key.as_resolved();
+        for reference in schema::document_refs(value) {
+          if let Some(resolved) = schema::resolve_ref(&reference, &base)
+            && let Some(next) = SchemaKey::from_resolved(&resolved)
+          {
+            self.collect_state(&next, seen, pending);
+          }
+        }
       },
     }
   }
@@ -210,6 +320,10 @@ impl DocumentSchemaCache {
         _ => None,
       })
       .collect::<Vec<_>>();
+    if waiting.is_empty() {
+      return;
+    }
+    self.compiled = None;
     for (key, depth, resolved) in waiting {
       self.entries.remove(&key);
       self.notifications.remove(&key);
@@ -227,6 +341,9 @@ impl DocumentSchemaCache {
         _ => None,
       })
       .collect::<Vec<_>>();
+    if !waiting.is_empty() {
+      self.compiled = None;
+    }
     let mut families = Vec::new();
     for (key, depth, resolved) in waiting {
       if let Resolved::Remote(url) = &resolved
@@ -321,6 +438,7 @@ impl DocumentSchemaCache {
   }
 
   fn finish_ready(&mut self, key: &SchemaKey, value: Value, depth: u32, window: &Window, cx: &mut App) {
+    self.compiled = None;
     self.entries.insert(key.clone(), Entry::Ready(Arc::new(value)));
     self.follow_refs(key, depth, window, cx);
   }

@@ -123,6 +123,8 @@ codegen-units = 1
 strip = true
 overflow-checks = true
 debug = false
+# Aborting panics drops unwind tables from the shipped binary.
+panic = "abort"
 
 # Build scripts and proc macros are host dylibs that rustc `dlopen`s during the
 # build. Stripping one corrupts its load commands, and the macOS release build

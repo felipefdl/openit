@@ -2,7 +2,7 @@ use crate::actions::{CloseWindow, ColorTheme, GoToFile, Save, ToggleMode};
 use crate::drop::{apply_external_paths, external_paths_ring};
 use crate::image_cache::{DocumentImageCache, PermissionAnswer, PermissionRequests};
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
-use crate::schema_cache::{DocumentSchemaCache, SchemaDocs};
+use crate::schema_cache::DocumentSchemaCache;
 use crate::schema_complete;
 use crate::schema_validate::collect_issues;
 use crate::session::{CHECKPOINT_DELAY, DocumentSession, PromptKind};
@@ -26,7 +26,7 @@ use openit_core::document::{Loaded, Revision, Snapshot};
 use openit_core::kind::DocumentKind;
 use openit_core::recovery::Draft;
 use openit_core::resource::DomainFamily;
-use openit_core::schema::JsonFamily;
+use openit_core::schema::{self, JsonFamily};
 use openit_core::select::SchemaSelection;
 use openit_core::session::SessionId;
 use openit_core::settings::{MarkdownMode, MarkdownPreviewWidth};
@@ -41,6 +41,8 @@ pub enum Mode {
 const MIN_PREVIEW_SIDE_PADDING: f32 = 24.;
 const READABLE_PREVIEW_WIDTH: f32 = 700.;
 const WIDE_PREVIEW_WIDTH: f32 = 960.;
+/// Trailing space so the last preview line clears the window edge.
+const PREVIEW_SPACER: &str = "\n\n<br>\n";
 
 fn markdown_preview_width(width: MarkdownPreviewWidth, viewport: gpui_kit::Pixels) -> gpui_kit::Pixels {
   let available = (viewport - gpui_kit::px(MIN_PREVIEW_SIDE_PADDING * 2.)).max(gpui_kit::px(0.));
@@ -52,6 +54,12 @@ fn markdown_preview_width(width: MarkdownPreviewWidth, viewport: gpui_kit::Pixel
 }
 
 type OpenParams = (PathBuf, DocumentKind, String, Option<Fingerprint>, SessionId);
+
+fn rope_to_string(rope: &Rope) -> String {
+  let mut text = String::with_capacity(rope.len());
+  text.extend(rope.chunks());
+  text
+}
 
 fn schema_settings_key(path: &Path) -> Option<String> {
   if path.as_os_str().is_empty() {
@@ -87,18 +95,44 @@ impl Overlay {
     }
   }
 }
+
+struct CursorStatus {
+  editor: Entity<EditorState>,
+  _observation: Subscription,
+}
+
+impl CursorStatus {
+  fn new(editor: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+    Self {
+      _observation: cx.observe(&editor, |_, _, cx| cx.notify()),
+      editor,
+    }
+  }
+}
+
+impl Render for CursorStatus {
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let position = self.editor.read(cx).cursor_position();
+    format!(
+      "Ln {}, Col {}",
+      position.line.saturating_add(1),
+      position.character.saturating_add(1)
+    )
+  }
+}
+
 pub struct DocumentView {
   pub(crate) session: DocumentSession,
   mode: Mode,
   focus: FocusHandle,
-  pub(crate) initial_text: Option<String>,
+  pub(crate) initial_text: Option<Rope>,
   pending_cursor: Option<usize>,
   pub(crate) editor: Option<Entity<EditorState>>,
   preview: Option<Entity<TextViewState>>,
   preview_revision: Option<Revision>,
   preview_observation: Option<Subscription>,
   editor_subscription: Option<Subscription>,
-  editor_observation: Option<Subscription>,
+  cursor_status_view: Option<Entity<CursorStatus>>,
   requests_observation: Option<Subscription>,
   settings_store_observation: Option<Subscription>,
   appearance_observation: Option<Subscription>,
@@ -142,14 +176,14 @@ impl DocumentView {
         _ => Mode::Edit,
       },
       focus: cx.focus_handle(),
-      initial_text: Some(text),
+      initial_text: Some(Rope::from(text)),
       pending_cursor: None,
       editor: None,
       preview: None,
       preview_revision: None,
       preview_observation: None,
       editor_subscription: None,
-      editor_observation: None,
+      cursor_status_view: None,
       requests_observation: None,
       settings_store_observation: None,
       appearance_observation: None,
@@ -171,40 +205,15 @@ impl DocumentView {
       language_override: None,
       embedded: false,
     };
-    view.requests_observation = Some(cx.observe(&requests, |this, requests, cx| {
+    view.requests_observation = Some(cx.observe_in(&requests, window, |this, requests, window, cx| {
       let answers = requests.update(cx, |requests, _| requests.take_answers());
       this.pending_answers.extend(answers);
-      if this.pending_answers.is_empty() {
-        cx.notify();
-        return;
+      this.schema_cache.update(cx, |cache, cx| cache.pump(window, cx));
+      if this.schema_waiting {
+        this.start_schema_validation(window, cx);
       }
-      if this.permission_task.is_none() {
-        this.permission_task = Some(cx.spawn(async move |this, cx| {
-          loop {
-            let answers = this
-              .update(cx, |view, _| std::mem::take(&mut view.pending_answers))
-              .unwrap_or_else(|_| Vec::new());
-            if answers.is_empty() {
-              let stop = this
-                .update(cx, |view, _| {
-                  if view.pending_answers.is_empty() {
-                    view.permission_task = None;
-                    true
-                  } else {
-                    false
-                  }
-                })
-                .unwrap_or(true);
-              if stop {
-                break;
-              }
-              continue;
-            }
-            for answer in answers {
-              let _ = this.update_in(cx, |view, window, cx| view.apply_permission_answer(answer, window, cx));
-            }
-          }
-        }));
+      if !this.pending_answers.is_empty() && this.permission_task.is_none() {
+        this.permission_task = Some(Self::drain_permission_answers(cx));
       }
       cx.notify();
     }));
@@ -215,6 +224,9 @@ impl DocumentView {
       this.session.schedule_autosave(cx);
       this.image_cache.update(cx, |cache, cx| cache.retry_all(window, cx));
       this.schema_cache.update(cx, |cache, cx| cache.retry_all(window, cx));
+      if this.json_family().is_some() {
+        this.start_schema_validation(window, cx);
+      }
       cx.notify();
     }));
     view.settings_store_observation = Some(cx.observe_global::<SettingsStore>(|_, cx| cx.notify()));
@@ -230,8 +242,44 @@ impl DocumentView {
     view
   }
 
-  fn begin_schema(&mut self, window: &Window, cx: &mut Context<Self>) {
-    self.schema_observation = Some(cx.observe(&self.schema_cache, |_, _, cx| cx.notify()));
+  /// Apply queued permission answers until the queue stays empty.
+  fn drain_permission_answers(cx: &Context<Self>) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+      loop {
+        let answers = this
+          .update(cx, |view, _| std::mem::take(&mut view.pending_answers))
+          .unwrap_or_else(|_| Vec::new());
+        if answers.is_empty() {
+          let stop = this
+            .update(cx, |view, _| {
+              if view.pending_answers.is_empty() {
+                view.permission_task = None;
+                true
+              } else {
+                false
+              }
+            })
+            .unwrap_or(true);
+          if stop {
+            break;
+          }
+          continue;
+        }
+        for answer in answers {
+          let _ = this.update_in(cx, |view, window, cx| view.apply_permission_answer(answer, window, cx));
+        }
+      }
+    })
+  }
+
+  fn begin_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.schema_observation = Some(cx.observe_in(&self.schema_cache, window, |this, _, window, cx| {
+      this.schema_cache.update(cx, |cache, cx| cache.pump(window, cx));
+      if this.schema_waiting {
+        this.start_schema_validation(window, cx);
+      }
+      cx.notify();
+    }));
     self.start_schema_validation(window, cx);
   }
   pub fn restore(draft: Draft, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -374,7 +422,7 @@ impl DocumentView {
   fn buffer_text(&self, cx: &App) -> Option<Rope> {
     match (&self.editor, &self.initial_text) {
       (Some(editor), _) => Some(editor.read(cx).text().clone()),
-      (None, Some(initial)) => Some(Rope::from_str(initial)),
+      (None, Some(initial)) => Some(initial.clone()),
       (None, None) => None,
     }
   }
@@ -484,17 +532,20 @@ impl DocumentView {
     self.request_close(window, cx);
   }
   fn install_close_guard(window: &Window, cx: &Context<Self>) {
-    let entity = cx.entity();
+    // Weak: the platform window outlives the close in gpui-pre, and a strong entity here would keep the document alive with it.
+    let entity = cx.entity().downgrade();
     window.on_window_should_close(cx, move |window, cx| {
-      entity.update(cx, |view, cx| {
-        let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
-        if quitting && view.session.closing {
-          true
-        } else {
-          view.request_close(window, cx);
-          false
-        }
-      })
+      entity
+        .update(cx, |view, cx| {
+          let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
+          if quitting && view.session.closing {
+            true
+          } else {
+            view.request_close(window, cx);
+            false
+          }
+        })
+        .unwrap_or(true)
     });
   }
   pub(crate) fn on_disk_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -516,7 +567,7 @@ impl DocumentView {
     if let Some(editor) = &self.editor {
       return editor.clone();
     }
-    let text = self.initial_text.take().unwrap_or_default();
+    let text = self.initial_text.take().map(|rope| rope_to_string(&rope)).unwrap_or_default();
     let language = Some(self.language());
     let family = self.json_family();
     let cache = self.schema_cache.clone();
@@ -554,7 +605,7 @@ impl DocumentView {
         }
       }
     }));
-    self.editor_observation = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
+    self.cursor_status_view = Some(cx.new(|cx| CursorStatus::new(editor.clone(), cx)));
     self.editor = Some(editor.clone());
     editor
   }
@@ -796,26 +847,28 @@ impl DocumentView {
   fn answer_always(&self, cx: &mut Context<Self>) {
     self.requests.update(cx, PermissionRequests::answer_always);
   }
-  fn apply_permission_answer(&self, answer: PermissionAnswer, window: &Window, cx: &mut Context<Self>) {
+  fn apply_permission_answer(&mut self, answer: PermissionAnswer, window: &Window, cx: &mut Context<Self>) {
     match answer {
       PermissionAnswer::Allow(family) => self.allow_family(&family, window, cx),
       PermissionAnswer::Always => self.allow_always(window, cx),
     }
   }
 
-  fn allow_family(&self, family: &DomainFamily, window: &Window, cx: &mut Context<Self>) {
+  fn allow_family(&mut self, family: &DomainFamily, window: &Window, cx: &mut Context<Self>) {
     SettingsStore::update(&mut *cx, |settings| settings.allow_family(family));
     self.requests.update(cx, |requests, cx| requests.dismiss_family(family, cx));
     self.image_cache.update(cx, |cache, cx| cache.retry_family(family, window, cx));
     self.schema_cache.update(cx, |cache, cx| cache.retry_family(family, window, cx));
+    self.start_schema_validation(window, cx);
     cx.notify();
   }
 
-  fn allow_always(&self, window: &Window, cx: &mut Context<Self>) {
+  fn allow_always(&mut self, window: &Window, cx: &mut Context<Self>) {
     SettingsStore::update(&mut *cx, |settings| settings.allow_remote = true);
     self.requests.update(cx, PermissionRequests::dismiss_all);
     self.image_cache.update(cx, |cache, cx| cache.retry_all(window, cx));
     self.schema_cache.update(cx, |cache, cx| cache.retry_all(window, cx));
+    self.start_schema_validation(window, cx);
     cx.notify();
   }
   fn ensure_preview(&mut self, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
@@ -823,9 +876,9 @@ impl DocumentView {
       return self.preview.clone();
     }
     let snapshot = self.snapshot(cx)?;
-    let mut source = snapshot.text.to_string();
-    // Preview-only spacer scrolls with the content without changing the document.
-    source.push_str("\n\n<br>\n");
+    let mut source = String::with_capacity(snapshot.text.len().saturating_add(PREVIEW_SPACER.len()));
+    source.extend(snapshot.text.chunks());
+    source.push_str(PREVIEW_SPACER);
     let preview = match &self.preview {
       Some(preview) => {
         preview.update(cx, |state, cx| state.set_text(&source, cx));
@@ -877,26 +930,27 @@ impl DocumentView {
     if self.session.closing {
       return;
     }
-    let Some(text) = self.buffer_text(cx).map(|rope| rope.to_string()) else {
+    let Some(rope) = self.buffer_text(cx) else {
       return;
     };
+    let text = rope_to_string(&rope);
+    let parsed = schema::parse(family, &text);
     let path = self.session.path.clone();
     let revision = self.session.revision;
-    self.schema_cache.update(cx, |cache, cx| {
-      cache.load_document(&path, &text, self.schema_pick.as_deref(), window, cx);
+    let pick = self.schema_pick.clone();
+    let (pending, compiled) = self.schema_cache.update(cx, |cache, cx| {
+      cache.load_document(&path, parsed.as_ref().ok(), &text, pick.as_deref(), window, cx);
+      let pending = cache.prepare_compiled();
+      (pending, cache.compiled())
     });
-    let documents = match self.schema_cache.read(cx).documents() {
-      SchemaDocs::Pending => {
-        self.schema_waiting = true;
-        return;
-      },
-      SchemaDocs::None => None,
-      SchemaDocs::Ready(documents) => Some(documents),
-    };
+    if pending {
+      self.schema_waiting = true;
+      return;
+    }
     self.schema_waiting = false;
     self.schema_apply_task = Some(cx.spawn(async move |this, cx| {
       let issues = cx
-        .background_spawn(async move { collect_issues(family, &text, documents.as_ref()) })
+        .background_spawn(async move { collect_issues(parsed.as_ref(), compiled.as_deref()) })
         .await;
       let _ = this.update(cx, |view, cx| view.apply_schema_issues(revision, issues, cx));
     }));
@@ -978,25 +1032,15 @@ impl DocumentView {
         .child(actions),
     )
   }
+  /// The caret readout entity, which only the editor shows. Preview reports
+  /// nothing, where a stale line and column would sit there unchanged.
+  fn caret_readout(&self) -> Option<Entity<CursorStatus>> {
+    self.cursor_status_view.as_ref().filter(|_| self.mode == Mode::Edit).cloned()
+  }
   fn settings_error_message(cx: &App) -> Option<String> {
     cx.try_global::<SettingsStore>()
       .and_then(|store| store.last_error())
       .map(|error| format!("Settings could not be saved: {error}"))
-  }
-  /// The caret readout, which only the editor has. Preview reports nothing,
-  /// where a stale line and column would sit there unchanged.
-  fn cursor_status(&self, cx: &App) -> Option<String> {
-    match (self.mode, &self.editor) {
-      (Mode::Edit, Some(editor)) => {
-        let position = editor.read(cx).cursor_position();
-        Some(format!(
-          "Ln {}, Col {}",
-          position.line.saturating_add(1),
-          position.character.saturating_add(1)
-        ))
-      },
-      _ => None,
-    }
   }
   /// Whether the status bar carries a warning or an error the reader must see.
   fn status_bar_reports_a_problem(&self, cx: &App) -> bool {
@@ -1024,7 +1068,6 @@ impl DocumentView {
   )]
   fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let theme = cx.theme();
-    let position = self.cursor_status(cx);
     let language = language_label(self.language());
     let settings_error = Self::settings_error_message(cx);
     let segment = |id: &'static str, text: String| {
@@ -1055,8 +1098,15 @@ impl DocumentView {
       })
       .text_xs()
       .text_color(theme.muted_foreground)
-      .children(position.map(|text| {
-        segment("status-position", text).on_click(cx.listener(|this, _, window, cx| this.open_go_to_line(window, cx)))
+      .children(self.caret_readout().map(|status| {
+        div()
+          .id("status-position")
+          .px_1()
+          .rounded_sm()
+          .cursor_pointer()
+          .hover(|s| s.bg(theme.muted))
+          .child(status)
+          .on_click(cx.listener(|this, _, window, cx| this.open_go_to_line(window, cx)))
       }))
       .when(self.external_change(), |bar| match self.source_status() {
         Some(message) => bar.child(div().text_color(theme.warning_foreground).child(message)),
@@ -1222,9 +1272,6 @@ impl DocumentView {
 impl Render for DocumentView {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.schema_cache.update(cx, |cache, cx| cache.pump(window, cx));
-    if self.schema_waiting {
-      self.start_schema_validation(window, cx);
-    }
     if self.json_family().is_some()
       && !self.schema_ask_opened
       && self.overlay.is_none()
@@ -1954,19 +2001,19 @@ pub(crate) mod tests {
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
     cx.update(|_, cx| SettingsStore::update(cx, |settings| settings.always_show_status_bar = true));
     cx.run_until_parked();
-    assert!(view.read_with(cx, super::DocumentView::cursor_status).is_none());
+    assert!(view.read_with(cx, |view, _| view.caret_readout().is_none()));
 
     cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_mode(&super::ToggleMode, window, cx)));
 
-    assert_eq!(
-      view.read_with(cx, super::DocumentView::cursor_status).as_deref(),
-      Some("Ln 1, Col 1")
-    );
+    let readout = view
+      .read_with(cx, |view, _| view.caret_readout())
+      .expect("the editor shows the caret");
+    assert_eq!(cx.update(|_, cx| readout.read(cx).editor.read(cx).cursor_position().line), 0);
 
     cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_mode(&super::ToggleMode, window, cx)));
 
     assert!(
-      view.read_with(cx, super::DocumentView::cursor_status).is_none(),
+      view.read_with(cx, |view, _| view.caret_readout().is_none()),
       "returning to preview drops the caret readout"
     );
   }

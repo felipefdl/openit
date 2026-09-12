@@ -38,24 +38,15 @@ pub(crate) fn warm_fonts(cx: &App) {
     .detach();
 }
 
-/// Rasterize `svg` at `scale` times its intrinsic size into straight-alpha
-/// RGBA8. `base_dir` bounds local `href` resolution; `None` resolves nothing.
-pub(crate) fn rasterize(svg: &[u8], scale: f32, base_dir: Option<&Path>) -> Result<(u32, u32, Vec<u8>), String> {
-  let tree = parse(svg, base_dir)?;
-  let size = tree
-    .size()
-    .to_int_size()
-    .scale_by(scale)
-    .ok_or_else(|| "the image has no drawable size".to_owned())?;
-  let mut pixmap =
-    tiny_skia::Pixmap::new(size.width(), size.height()).ok_or_else(|| "the image is too large to draw".to_owned())?;
-  resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-  let mut rgba = Vec::with_capacity(pixmap.data().len());
-  for pixel in pixmap.pixels() {
-    let straight = pixel.demultiply();
-    rgba.extend_from_slice(&[straight.red(), straight.green(), straight.blue(), straight.alpha()]);
-  }
-  Ok((size.width(), size.height(), rgba))
+/// Clamp a window or fit scale into the display raster budget.
+pub(crate) const fn clamp_display_scale(needed: f32) -> f32 {
+  needed.clamp(0.01, MAX_DISPLAY_SCALE)
+}
+
+fn display_scale(longest: u32, needed: f32) -> f32 {
+  let longest = f32::from(u16::try_from(longest.max(1)).unwrap_or(u16::MAX)).max(1.0);
+  let cap = f32::from(u16::try_from(MAX_IMAGE_EDGE).unwrap_or(u16::MAX));
+  clamp_display_scale(needed).min(cap / longest)
 }
 
 /// The intrinsic pixel size of an SVG document.
@@ -78,12 +69,7 @@ pub(crate) fn rasterize_to(
   let scale_x = f32::from(u16::try_from(width).unwrap_or(u16::MAX)) / intrinsic.width().max(1.0);
   let scale_y = f32::from(u16::try_from(height).unwrap_or(u16::MAX)) / intrinsic.height().max(1.0);
   resvg::render(&tree, tiny_skia::Transform::from_scale(scale_x, scale_y), &mut pixmap.as_mut());
-  let mut rgba = Vec::with_capacity(pixmap.data().len());
-  for pixel in pixmap.pixels() {
-    let straight = pixel.demultiply();
-    rgba.extend_from_slice(&[straight.red(), straight.green(), straight.blue(), straight.alpha()]);
-  }
-  Ok((width, height, rgba))
+  Ok((width, height, into_straight_rgba(pixmap)))
 }
 
 /// Rasterize an SVG document for display, transformed and capped like a raster.
@@ -92,20 +78,63 @@ pub(crate) fn decode_document(
   transform: Transform,
   base_dir: Option<&Path>,
 ) -> Result<DocumentImage, String> {
+  decode_document_at(bytes, transform, base_dir, 1.0)
+}
+
+/// Rasterize an SVG at `needed_scale` (window scale factor times fit), capped.
+pub(crate) fn decode_document_at(
+  bytes: &[u8],
+  transform: Transform,
+  base_dir: Option<&Path>,
+  needed_scale: f32,
+) -> Result<DocumentImage, String> {
   let tree = parse(bytes, base_dir)?;
   let intrinsic = tree.size().to_int_size();
-  let longest = f32::from(u16::try_from(intrinsic.width().max(intrinsic.height())).unwrap_or(u16::MAX)).max(1.0);
-  let cap = f32::from(u16::try_from(MAX_IMAGE_EDGE).unwrap_or(u16::MAX));
-  let scale = (cap / longest).clamp(0.01, MAX_DISPLAY_SCALE);
-  let (width, height, rgba) = rasterize(bytes, scale, base_dir)?;
+  let scale = display_scale(intrinsic.width().max(intrinsic.height()), needed_scale);
+  let (width, height, rgba) = rasterize_tree(&tree, scale)?;
   let buffer =
     image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| "the rasterized image is malformed".to_owned())?;
-  let rotated = transformed(&image::DynamicImage::ImageRgba8(buffer), transform).into_rgba8();
+  let rotated = transformed(image::DynamicImage::ImageRgba8(buffer), transform).into_rgba8();
   Ok(DocumentImage {
     // `fit` also swaps RGBA into the BGRA order GPUI paints.
     render: to_render_image(vec![image::Frame::new(fit(rotated))]),
     has_alpha: true,
   })
+}
+
+fn rasterize_tree(tree: &usvg::Tree, scale: f32) -> Result<(u32, u32, Vec<u8>), String> {
+  let size = tree
+    .size()
+    .to_int_size()
+    .scale_by(scale)
+    .ok_or_else(|| "the image has no drawable size".to_owned())?;
+  let mut pixmap =
+    tiny_skia::Pixmap::new(size.width(), size.height()).ok_or_else(|| "the image is too large to draw".to_owned())?;
+  resvg::render(tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+  Ok((size.width(), size.height(), into_straight_rgba(pixmap)))
+}
+
+fn into_straight_rgba(pixmap: tiny_skia::Pixmap) -> Vec<u8> {
+  let mut data = pixmap.take();
+  for chunk in data.as_chunks_mut::<4>().0 {
+    let [r, g, b, a] = chunk;
+    let alpha = *a;
+    if alpha == 0 || alpha == 255 {
+      continue;
+    }
+    *r = demultiply_channel(*r, alpha);
+    *g = demultiply_channel(*g, alpha);
+    *b = demultiply_channel(*b, alpha);
+  }
+  data
+}
+
+fn demultiply_channel(channel: u8, alpha: u8) -> u8 {
+  if alpha == 0 {
+    return 0;
+  }
+  let n = u32::from(channel) * 255 + u32::from(alpha) / 2;
+  u8::try_from(n / u32::from(alpha)).unwrap_or(u8::MAX)
 }
 
 /// Parse one SVG document with fonts loaded and local reads bounded.
@@ -142,7 +171,11 @@ fn bounded_resolver(base_dir: Option<&Path>) -> usvg::ImageHrefStringResolverFn<
 mod tests {
   use openit_core::raster::Transform;
 
-  use super::rasterize;
+  use std::path::Path;
+
+  fn rasterize(svg: &[u8], scale: f32, base_dir: Option<&Path>) -> Result<(u32, u32, Vec<u8>), String> {
+    super::rasterize_tree(&super::parse(svg, base_dir)?, scale)
+  }
 
   #[test]
   fn a_decoded_svg_document_is_in_gpui_channel_order() {

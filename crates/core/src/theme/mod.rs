@@ -8,5 +8,7 @@ pub mod spec;
 pub mod syntax;
 
 pub use palette::UiPalette;
-pub use spec::{Player, Rgba, SyntaxToken, ThemeKind, ThemeSpec, ThemeStyle, parse_theme_family};
+pub use spec::{
+  Player, Rgba, SyntaxToken, ThemeKind, ThemeMeta, ThemeSpec, ThemeStyle, parse_theme_family, parse_theme_family_meta,
+};
 pub use syntax::syntax_styles;

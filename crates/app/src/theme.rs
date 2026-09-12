@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -9,7 +11,9 @@ use gpui_kit::component::highlighter::HighlightThemeStyle;
 use gpui_kit::component::theme::{Theme, ThemeConfig, ThemeConfigColors, ThemeMode as GpuiThemeMode};
 use gpui_kit::{App, Global, Hsla, SharedString, Window, WindowAppearance};
 use openit_core::settings::ThemeMode as SettingsThemeMode;
-use openit_core::theme::{Rgba, ThemeKind, ThemeSpec, ThemeStyle, UiPalette, parse_theme_family, syntax_styles};
+use openit_core::theme::{
+  Rgba, ThemeKind, ThemeSpec, ThemeStyle, UiPalette, parse_theme_family, parse_theme_family_meta, syntax_styles,
+};
 use serde_json::Value;
 
 use crate::assets;
@@ -36,12 +40,19 @@ pub struct ThemeEntry {
   pub kind: ThemeKind,
 }
 
-/// Every bundled and user theme, parsed when the catalog is built.
+enum FamilySource {
+  Bundled(Cow<'static, [u8]>),
+  User(PathBuf),
+}
+
+/// Every bundled and user theme. Style bodies are parsed on demand.
 pub struct ThemeCatalog {
   /// Themes sorted by label.
   pub(crate) entries: Vec<ThemeEntry>,
-  specs: HashMap<String, ThemeSpec>,
-  palettes: HashMap<String, UiPalette>,
+  sources: HashMap<String, Rc<FamilySource>>,
+  parsed: RefCell<HashMap<String, ThemeSpec>>,
+  palettes: RefCell<HashMap<String, UiPalette>>,
+  configs: RefCell<HashMap<String, Rc<ThemeConfig>>>,
   dark_base: ThemeStyle,
   light_base: ThemeStyle,
   /// How many catalogs this application has built, counting this one.
@@ -65,12 +76,15 @@ impl ThemeCatalog {
 
   /// Return the resolved palette for `id`.
   pub fn palette(&self, id: &str) -> Option<UiPalette> {
-    self.palettes.get(id).copied()
+    self.ensure_parsed(id);
+    self.palettes.borrow().get(id).copied()
   }
 
   /// Return the parsed specification for `id`.
-  pub fn spec(&self, id: &str) -> Option<&ThemeSpec> {
-    self.specs.get(id)
+  #[cfg(test)]
+  pub fn spec(&self, id: &str) -> Option<ThemeSpec> {
+    self.ensure_parsed(id);
+    self.parsed.borrow().get(id).cloned()
   }
 
   /// Return the appearance kind for `id`.
@@ -83,6 +97,54 @@ impl ThemeCatalog {
       ThemeKind::Dark => &self.dark_base,
       ThemeKind::Light => &self.light_base,
     }
+  }
+
+  fn remember(&self, specs: Vec<ThemeSpec>) {
+    let mut parsed = self.parsed.borrow_mut();
+    let mut palettes = self.palettes.borrow_mut();
+    for spec in specs {
+      if parsed.contains_key(&spec.id) {
+        continue;
+      }
+      let base = match spec.kind {
+        ThemeKind::Dark => &self.dark_base,
+        ThemeKind::Light => &self.light_base,
+      };
+      palettes.insert(spec.id.clone(), UiPalette::from_style(&spec.style, spec.kind, base));
+      parsed.insert(spec.id.clone(), spec);
+    }
+  }
+
+  fn ensure_parsed(&self, id: &str) {
+    if self.parsed.borrow().contains_key(id) {
+      return;
+    }
+    let Some(source) = self.sources.get(id).cloned() else {
+      return;
+    };
+    let Some(specs) = parse_family_source(&source) else {
+      return;
+    };
+    self.remember(specs);
+  }
+
+  fn cached_config(&self, id: &str) -> Option<Rc<ThemeConfig>> {
+    if let Some(config) = self.configs.borrow().get(id) {
+      return Some(Rc::clone(config));
+    }
+    self.ensure_parsed(id);
+    let spec = self.parsed.borrow().get(id)?.clone();
+    let palette = *self.palettes.borrow().get(id)?;
+    let config = Rc::new(theme_config(&spec, &palette, self.base(spec.kind)));
+    self.configs.borrow_mut().insert(id.to_owned(), Rc::clone(&config));
+    Some(config)
+  }
+
+  fn visual(&self, id: &str) -> Option<(ThemeKind, UiPalette, Rc<ThemeConfig>)> {
+    let kind = self.kind(id)?;
+    let palette = self.palette(id)?;
+    let config = self.cached_config(id)?;
+    Some((kind, palette, config))
   }
 }
 
@@ -220,11 +282,18 @@ pub fn reload_user_themes(window: Option<&mut Window>, cx: &mut App) {
 /// Switch gpui-component and the active application palette to `id`.
 /// Unknown ids fall back to the default of `wanted`.
 pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx: &mut App) {
-  let Some((kind, palette, spec, base)) = resolve_visual(id, wanted, cx) else {
+  let resolved = {
+    let catalog = ThemeCatalog::get(cx);
+    if catalog.kind(id).is_some() {
+      id
+    } else {
+      default_for(wanted)
+    }
+  };
+  let Some((kind, palette, config)) = ThemeCatalog::get(cx).visual(resolved) else {
     tracing::warn!(%id, ?wanted, "could not resolve theme");
     return;
   };
-  let config = Rc::new(theme_config(&spec, &palette, &base));
   Theme::global_mut(cx).apply_config(&config);
   Theme::change(
     if kind == ThemeKind::Dark {
@@ -267,80 +336,119 @@ pub const fn default_for(kind: ThemeKind) -> &'static str {
 fn load_catalog(cx: &App) -> ThemeCatalog {
   #[cfg(test)]
   let builds = cx.try_global::<ThemeCatalog>().map_or(0, |catalog| catalog.builds) + 1;
-  let mut bundled = Vec::new();
-  for (file_name, json) in assets::theme_files() {
-    match parse_theme_family(&json) {
-      Ok(specs) => bundled.extend(specs),
-      Err(error) => tracing::warn!(%error, "skipping bundled theme family {file_name}"),
-    }
-  }
-
-  let dark_base = base_style(&bundled, ThemeKind::Dark, "One Dark");
-  let light_base = base_style(&bundled, ThemeKind::Light, "One Light");
-  let bundled_ids: HashSet<String> = bundled.iter().map(|spec| spec.id.clone()).collect();
-  let mut all_specs = bundled;
-  let user_dir = cx.global::<ThemeDirs>().user.as_deref();
-  load_user_specs(&mut all_specs, &bundled_ids, user_dir);
-
   let mut entries = Vec::new();
-  let mut specs = HashMap::new();
-  let mut palettes = HashMap::new();
+  let mut sources = HashMap::new();
+  let mut taken = HashSet::new();
 
-  for spec in all_specs {
-    let id = spec.id.clone();
-    if specs.contains_key(&id) {
-      tracing::warn!(%id, "skipping duplicate theme id");
-      continue;
-    }
-    let base = match spec.kind {
-      ThemeKind::Dark => &dark_base,
-      ThemeKind::Light => &light_base,
+  for (file_name, bytes) in assets::theme_files() {
+    let json = match std::str::from_utf8(&bytes) {
+      Ok(json) => json,
+      Err(error) => {
+        tracing::warn!(%error, "skipping bundled theme family {file_name}");
+        continue;
+      },
     };
-    let palette = UiPalette::from_style(&spec.style, spec.kind, base);
-    entries.push(ThemeEntry {
-      id: id.clone(),
-      label: spec.name.clone(),
-      kind: spec.kind,
-    });
-    palettes.insert(id.clone(), palette);
-    specs.insert(id, spec);
+    let meta = match parse_theme_family_meta(json) {
+      Ok(meta) => meta,
+      Err(error) => {
+        tracing::warn!(%error, "skipping bundled theme family {file_name}");
+        continue;
+      },
+    };
+    let source = Rc::new(FamilySource::Bundled(bytes));
+    for theme in meta {
+      if !taken.insert(theme.id.clone()) {
+        tracing::warn!(id = %theme.id, "skipping duplicate theme id");
+        continue;
+      }
+      entries.push(ThemeEntry {
+        id: theme.id.clone(),
+        label: theme.name,
+        kind: theme.kind,
+      });
+      sources.insert(theme.id, Rc::clone(&source));
+    }
   }
-  entries.sort_by_key(|entry| entry.label.to_lowercase());
 
-  ThemeCatalog {
+  let bundled_ids = taken.clone();
+  let user_dir = cx.global::<ThemeDirs>().user.as_deref();
+  load_user_families(&mut entries, &mut sources, &mut taken, &bundled_ids, user_dir);
+
+  let (dark_base, light_base, base_specs) = bases_from(&sources);
+  entries.sort_by_key(|entry| entry.label.to_lowercase());
+  let catalog = ThemeCatalog {
     entries,
-    specs,
-    palettes,
+    sources,
+    parsed: RefCell::new(HashMap::new()),
+    palettes: RefCell::new(HashMap::new()),
+    configs: RefCell::new(HashMap::new()),
     dark_base,
     light_base,
     #[cfg(test)]
     builds,
+  };
+  catalog.remember(base_specs);
+  let settings = &cx.global::<AppSettings>().0.theme;
+  catalog.ensure_parsed(&settings.dark);
+  catalog.ensure_parsed(&settings.light);
+  catalog
+}
+
+fn bases_from(sources: &HashMap<String, Rc<FamilySource>>) -> (ThemeStyle, ThemeStyle, Vec<ThemeSpec>) {
+  let specs = sources
+    .get("one-dark")
+    .and_then(|source| parse_family_source(source))
+    .unwrap_or_default();
+  let dark = specs
+    .iter()
+    .find(|spec| spec.name == "One Dark")
+    .map(|spec| spec.style.clone())
+    .unwrap_or_default();
+  let light = specs
+    .iter()
+    .find(|spec| spec.name == "One Light")
+    .map(|spec| spec.style.clone())
+    .unwrap_or_default();
+  (dark, light, specs)
+}
+
+fn parse_family_source(source: &FamilySource) -> Option<Vec<ThemeSpec>> {
+  match source {
+    FamilySource::Bundled(bytes) => parse_family_json(std::str::from_utf8(bytes).ok()?),
+    FamilySource::User(path) => parse_family_json(&read_theme_file(path).ok()?),
   }
 }
 
-fn base_style(specs: &[ThemeSpec], kind: ThemeKind, preferred_name: &str) -> ThemeStyle {
-  specs
-    .iter()
-    .find(|spec| spec.kind == kind && spec.name == preferred_name)
-    .or_else(|| specs.iter().find(|spec| spec.kind == kind))
-    .map_or_else(ThemeStyle::default, |spec| spec.style.clone())
+fn parse_family_json(json: &str) -> Option<Vec<ThemeSpec>> {
+  match parse_theme_family(json) {
+    Ok(specs) => Some(specs),
+    Err(error) => {
+      tracing::warn!(%error, "could not parse theme family");
+      None
+    },
+  }
 }
 
-fn load_user_specs(specs: &mut Vec<ThemeSpec>, bundled_ids: &HashSet<String>, themes_dir: Option<&Path>) {
-  let mut taken = bundled_ids.clone();
+fn load_user_families(
+  entries: &mut Vec<ThemeEntry>,
+  sources: &mut HashMap<String, Rc<FamilySource>>,
+  taken: &mut HashSet<String>,
+  bundled_ids: &HashSet<String>,
+  themes_dir: Option<&Path>,
+) {
   let Some(themes_dir) = themes_dir else {
     return;
   };
   let mut paths = Vec::new();
-  let entries = match fs::read_dir(themes_dir) {
-    Ok(entries) => entries,
+  let dir_entries = match fs::read_dir(themes_dir) {
+    Ok(dir_entries) => dir_entries,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
     Err(error) => {
       tracing::warn!(path = %themes_dir.display(), %error, "could not scan user themes directory");
       return;
     },
   };
-  for entry in entries {
+  for entry in dir_entries {
     match entry {
       Ok(entry) if entry.path().extension() == Some(OsStr::new("json")) => paths.push(entry.path()),
       Ok(_) => {},
@@ -357,15 +465,16 @@ fn load_user_specs(specs: &mut Vec<ThemeSpec>, bundled_ids: &HashSet<String>, th
         continue;
       },
     };
-    let family = match parse_theme_family(&json) {
-      Ok(family) => family,
+    let meta = match parse_theme_family_meta(&json) {
+      Ok(meta) => meta,
       Err(error) => {
         tracing::warn!(path = %path.display(), %error, "skipping user theme file");
         continue;
       },
     };
-    for spec in family {
-      let id = spec.id.clone();
+    let source = Rc::new(FamilySource::User(path.clone()));
+    for theme in meta {
+      let id = theme.id.clone();
       if !taken.insert(id.clone()) {
         if bundled_ids.contains(&id) {
           tracing::warn!(%id, path = %path.display(), "skipping user theme with a bundled id");
@@ -374,7 +483,12 @@ fn load_user_specs(specs: &mut Vec<ThemeSpec>, bundled_ids: &HashSet<String>, th
         }
         continue;
       }
-      specs.push(spec);
+      entries.push(ThemeEntry {
+        id: theme.id.clone(),
+        label: theme.name,
+        kind: theme.kind,
+      });
+      sources.insert(theme.id, Rc::clone(&source));
     }
   }
 }
@@ -391,20 +505,6 @@ fn read_theme_file(path: &Path) -> IoResult<String> {
     return Err(std::io::Error::other("theme file exceeds the 1 MiB limit"));
   }
   String::from_utf8(bytes).map_err(std::io::Error::other)
-}
-
-fn resolve_visual(id: &str, wanted: ThemeKind, cx: &App) -> Option<(ThemeKind, UiPalette, ThemeSpec, ThemeStyle)> {
-  let catalog = ThemeCatalog::get(cx);
-  let resolved_id = if catalog.specs.contains_key(id) {
-    id.to_owned()
-  } else {
-    default_for(wanted).to_owned()
-  };
-  let kind = catalog.kind(&resolved_id)?;
-  let spec = catalog.spec(&resolved_id)?.clone();
-  let palette = catalog.palette(&resolved_id)?;
-  let base = catalog.base(kind).clone();
-  Some((kind, palette, spec, base))
 }
 
 #[cfg(test)]
@@ -508,8 +608,8 @@ mod tests {
       reload_user_themes(None, cx);
       assert_eq!(ThemeCatalog::get(cx).kind("mine-dark"), Some(ThemeKind::Dark));
       assert_eq!(
-        ThemeCatalog::get(cx).spec("one-dark").map(|spec| spec.name.as_str()),
-        Some("One Dark")
+        ThemeCatalog::get(cx).spec("one-dark").map(|spec| spec.name),
+        Some("One Dark".to_owned())
       );
       assert_eq!(ThemeCatalog::get(cx).kind("too-big"), None);
       assert_eq!(ThemeCatalog::get(cx).kind("broken"), None);

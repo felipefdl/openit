@@ -50,14 +50,14 @@ fn encode_export(
     let buffer =
       image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| "the rasterized image is malformed".to_owned())?;
     Decoded {
-      image: transformed(&image::DynamicImage::ImageRgba8(buffer), transform),
+      image: transformed(image::DynamicImage::ImageRgba8(buffer), transform),
       icc: None,
       has_alpha: true,
     }
   } else {
     let decoded = decode_still(bytes, format).map_err(|error| error.to_string())?;
     Decoded {
-      image: transformed(&decoded.image, transform),
+      image: transformed(decoded.image, transform),
       icc: decoded.icc,
       has_alpha: decoded.has_alpha,
     }
@@ -172,6 +172,8 @@ pub struct ImageView {
   watch_sender: Option<async_channel::Sender<()>>,
   window_handle: gpui_kit::AnyWindowHandle,
   decoded: Option<DocumentImage>,
+  identity: Option<DocumentImage>,
+  display_scale: f32,
   decode_error: Option<String>,
   decode_task: Option<Task<()>>,
   frame_index: usize,
@@ -186,10 +188,10 @@ pub struct ImageView {
   nearby_picker: Option<gpui_kit::Entity<NearbyPicker>>,
   export_dialog: Option<gpui_kit::Entity<ExportDialog>>,
   focus: gpui_kit::FocusHandle,
+  release: Option<gpui_kit::Subscription>,
 }
 
 impl ImageView {
-  /// Open `loaded` in this window and start decoding it off the UI thread.
   /// Open a document. Pixels decoded ahead of the window let the first frame
   /// show the image; `None` decodes in the background instead.
   pub fn open(
@@ -213,27 +215,35 @@ impl ImageView {
     );
     match decoded {
       Some(Ok(decoded)) => {
-        view.decode_task = None;
-        view.adopt_decoded(decoded);
+        if view.format == ImageFormat::Svg && view.display_scale > 1.0 {
+          cx.drop_image(decoded.render, None);
+          view.start_decode(cx);
+        } else {
+          view.adopt_decoded(decoded, cx);
+        }
       },
-      Some(Err(error)) => {
-        view.decode_task = None;
-        view.decode_error = Some(error);
-      },
-      None => {},
+      Some(Err(error)) => view.decode_error = Some(error),
+      None => view.start_decode(cx),
     }
     view.start_watch(window, cx);
     view
   }
 
   /// Take a decoded image, picking the default background the first time.
-  fn adopt_decoded(&mut self, decoded: DocumentImage) {
+  fn adopt_decoded(&mut self, decoded: DocumentImage, cx: &mut Context<Self>) {
     if !self.background_chosen && (decoded.has_alpha || self.format == ImageFormat::Svg) {
       self.background = ImageBackground::Checkerboard;
     }
     self.frame_index = 0;
     self.decode_error = None;
+    self.drop_gpu(cx);
+    self.identity = Some(decoded.clone());
     self.decoded = Some(decoded);
+    if self.transform.is_identity() {
+      self.start_animation(cx);
+    } else {
+      self.present_transform(cx);
+    }
   }
 
   /// Reopen a recovered image draft; the file on disk is not read.
@@ -259,6 +269,7 @@ impl ImageView {
       window,
       cx,
     );
+    view.start_decode(cx);
     if view.path.as_os_str().is_empty() {
       view.untitled = true;
     } else {
@@ -282,6 +293,7 @@ impl ImageView {
     );
     // Clipboard pixels live only in this window until they are saved.
     view.untitled = true;
+    view.start_decode(cx);
     view.schedule_checkpoint(cx);
     view
   }
@@ -330,6 +342,8 @@ impl ImageView {
       watch_sender: None,
       window_handle: window.window_handle(),
       decoded: None,
+      identity: None,
+      display_scale: svg::clamp_display_scale(window.scale_factor()),
       decode_error: None,
       decode_task: None,
       frame_index: 0,
@@ -344,10 +358,11 @@ impl ImageView {
       nearby_picker: None,
       export_dialog: None,
       focus: cx.focus_handle(),
+      release: None,
     };
     window.focus(&view.focus, cx);
     Self::install_close_guard(window, cx);
-    view.start_decode(cx);
+    view.release = Some(cx.on_release(Self::drop_gpu));
     view
   }
 
@@ -537,37 +552,30 @@ impl ImageView {
       .map(Path::to_path_buf)
   }
 
-  /// Decode (or re-decode after a transform) on a background thread.
+  /// Decode (or re-decode after a reload) on a background thread. Display
+  /// transforms reuse the identity bitmap instead of reading the file again.
   fn start_decode(&mut self, cx: &Context<Self>) {
     let handle = self.window_handle;
     let bytes = std::sync::Arc::clone(&self.source);
     let format = self.format;
-    let transform = self.transform;
     let base_dir = self.base_dir();
+    let display_scale = self.display_scale;
     self.decode_task = Some(cx.spawn(async move |view, cx| {
       let result = cx
         .background_spawn(async move {
           if format == ImageFormat::Svg {
-            svg::decode_document(&bytes, transform, base_dir.as_deref())
+            svg::decode_document_at(&bytes, Transform::IDENTITY, base_dir.as_deref(), display_scale)
           } else {
-            image_decode::decode_document(&bytes, format, transform)
+            image_decode::decode_document(&bytes, format, Transform::IDENTITY)
           }
         })
         .await;
       let _ = view.update(cx, |view, cx| {
         match result {
-          Ok(decoded) => {
-            if !view.background_chosen && (decoded.has_alpha || view.format == ImageFormat::Svg) {
-              view.background = ImageBackground::Checkerboard;
-            }
-            view.frame_index = 0;
-            view.decode_error = None;
-            view.decoded = Some(decoded);
-            view.start_animation(cx);
-          },
+          Ok(decoded) => view.adopt_decoded(decoded, cx),
           Err(error) => {
             tracing::error!(%error, path = %view.path.display(), "image decode failed");
-            view.decoded = None;
+            view.drop_gpu(cx);
             view.decode_error = Some(error);
           },
         }
@@ -575,6 +583,43 @@ impl ImageView {
       });
       refresh(handle, cx);
     }));
+  }
+
+  fn present_transform(&mut self, cx: &mut Context<Self>) {
+    let Some(identity) = self.identity.clone() else {
+      self.start_decode(cx);
+      return;
+    };
+    let next = image_decode::apply_transform(&identity, self.transform);
+    self.replace_decoded(next, cx);
+    self.start_animation(cx);
+  }
+
+  fn replace_decoded(&mut self, next: DocumentImage, cx: &mut gpui_kit::App) {
+    if let Some(previous) = self.decoded.take()
+      && !std::sync::Arc::ptr_eq(&previous.render, &next.render)
+    {
+      cx.drop_image(previous.render, None);
+    }
+    self.decoded = Some(next);
+  }
+
+  fn drop_gpu(&mut self, cx: &mut gpui_kit::App) {
+    let decoded = self.decoded.take();
+    let identity = self.identity.take();
+    match (decoded, identity) {
+      (Some(decoded), Some(identity)) if std::sync::Arc::ptr_eq(&decoded.render, &identity.render) => {
+        cx.drop_image(decoded.render, None);
+      },
+      (decoded, identity) => {
+        if let Some(decoded) = decoded {
+          cx.drop_image(decoded.render, None);
+        }
+        if let Some(identity) = identity {
+          cx.drop_image(identity.render, None);
+        }
+      },
+    }
   }
 
   /// Cycle animation frames at the delays the file declares.
@@ -628,7 +673,11 @@ impl ImageView {
   fn settle_transform(&mut self, next: Transform, cx: &mut Context<Self>) {
     self.transform = next;
     self.last_error = None;
-    self.start_decode(cx);
+    if self.identity.is_some() {
+      self.present_transform(cx);
+    } else {
+      self.start_decode(cx);
+    }
     if self.untitled {
       self.schedule_checkpoint(cx);
     } else if self.can_edit_in_place() {
@@ -1050,17 +1099,20 @@ impl ImageView {
 
   /// A window close from the platform runs the same prompt.
   fn install_close_guard(window: &Window, cx: &Context<Self>) {
-    let entity = cx.entity();
+    // Weak: the platform window outlives the close in gpui-pre, and a strong entity here would keep the document alive with it.
+    let entity = cx.entity().downgrade();
     window.on_window_should_close(cx, move |window, cx| {
-      entity.update(cx, |view, cx| {
-        let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
-        if view.closing && (quitting || view.close_decided) {
-          true
-        } else {
-          view.request_close(window, cx);
-          false
-        }
-      })
+      entity
+        .update(cx, |view, cx| {
+          let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
+          if view.closing && (quitting || view.close_decided) {
+            true
+          } else {
+            view.request_close(window, cx);
+            false
+          }
+        })
+        .unwrap_or(true)
     });
   }
 
@@ -1124,6 +1176,7 @@ impl ImageView {
             view.transform = Transform::IDENTITY;
             view.undo_stack.clear();
             view.redo_stack.clear();
+            view.drop_gpu(cx);
             view.start_decode(cx);
           },
           Err(error) => tracing::warn!(%error, "reload after an external change failed"),
@@ -1568,33 +1621,7 @@ fn paint_background(
   }
   let (light, dark) = checker;
   window.paint_quad(gpui_kit::fill(bounds, light));
-  let cell = px(CHECKER_CELL);
-  let columns = checker_steps(bounds.size.width);
-  let rows = checker_steps(bounds.size.height);
-  for row in 0..rows {
-    for column in (usize::from(row % 2 == 0)..columns).step_by(2) {
-      let origin = Point {
-        x: bounds.origin.x + cell * checker_offset(column),
-        y: bounds.origin.y + cell * checker_offset(row),
-      };
-      window.paint_quad(gpui_kit::fill(Bounds { origin, size: size(cell, cell) }, dark));
-    }
-  }
-}
-
-/// How many checkerboard cells cover `length`, bounded so one frame cannot
-/// enqueue an unreasonable number of quads.
-fn checker_steps(length: Pixels) -> usize {
-  const MAX_CELLS: u32 = 4096;
-  round_to_u32((f32::from(length) / CHECKER_CELL).ceil())
-    .min(MAX_CELLS)
-    .try_into()
-    .unwrap_or(0)
-}
-
-/// A cell index as a multiplier for the cell size.
-fn checker_offset(index: usize) -> f32 {
-  f32::from(u16::try_from(index).unwrap_or(u16::MAX))
+  window.paint_quad(gpui_kit::fill(bounds, gpui_kit::checkerboard(dark, CHECKER_CELL)));
 }
 
 /// Device pixels as window pixels. Textures are capped well inside `i16`.
@@ -1722,7 +1749,7 @@ mod tests {
 
     assert_eq!(view.read_with(cx, |view, _| view.status_text()), expected);
     assert_eq!(view.read_with(cx, |view, _| view.decode_error().map(str::to_owned)), None);
-    assert_eq!(view.read_with(cx, |view, _| view.background()), ImageBackground::Theme);
+    assert_eq!(view.read_with(cx, |view, _| view.background()), ImageBackground::Checkerboard);
   }
 
   #[gpui_kit::test]

@@ -10,7 +10,7 @@ use pdf_inspector::types::{ItemType, TextItem};
 use pdf_inspector::{MarkdownOptions, PdfOptions};
 
 use crate::error::Error;
-use crate::pdf::{FIGURE_PAD, FIGURE_SCALE, MAX_FIGURE_EDGE, MIN_FIGURE_EDGE, PageBitmap, PdfDocument, RectPt};
+use crate::pdf::{FIGURE_PAD, MIN_FIGURE_EDGE, PageBitmap, PdfDocument, RectPt, crop_page, render_page_figures};
 
 /// One figure lifted out of a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,14 +86,21 @@ pub fn convert_to_markdown(
     options = options.password(password);
   }
   let result = pdf_inspector::process_pdf_mem_with_options(bytes, options).map_err(convert_error)?;
-  let items = positioned_items(path, bytes, password)?;
+  let markdown_ready = result.markdown.filter(|markdown| !markdown.trim().is_empty());
+  // PdfProcessResult does not expose positioned items, so a second parse is
+  // required for figure boxes and for fallback Markdown. Skip it when the
+  // Markdown is already present and has no image placeholders to locate.
+  let need_items = markdown_ready.as_ref().is_none_or(|markdown| markdown.contains("![Image: "));
+  let items = if need_items {
+    positioned_items(path, bytes, password)?
+  } else {
+    Vec::new()
+  };
   // The classifier withholds Markdown for an image-dominated document, but a
   // page can be mostly artwork and still carry text worth converting, so the
   // extracted runs get the last word.
-  let markdown = match result.markdown {
-    Some(markdown) if !markdown.trim().is_empty() => markdown,
-    _ => pdf_inspector::to_markdown_from_items(items.clone(), markdown_options()),
-  };
+  let images = image_boxes(&items);
+  let markdown = markdown_ready.unwrap_or_else(|| pdf_inspector::to_markdown_from_items(items, markdown_options()));
   let pages = split_pages(&markdown);
   // Figure placeholders are not text: a scanned page is one big image, and a
   // file of nothing but figure links is not a conversion of anything.
@@ -101,7 +108,6 @@ pub fn convert_to_markdown(
     return Ok(ConvertOutcome::NoText);
   }
 
-  let images = image_boxes(&items);
   let directory = images_dir_name(stem);
   let mut figures: Vec<Figure> = Vec::new();
   let mut skipped_pages = Vec::new();
@@ -114,6 +120,7 @@ pub fn convert_to_markdown(
     let mut links = Vec::new();
     let mut used: HashMap<String, usize> = HashMap::new();
     let mut on_page = 0_usize;
+    let mut raster: Option<(PageBitmap, f32)> = None;
     for name in placeholder_names(body) {
       let candidates = images.get(page).map_or(&[][..], Vec::as_slice);
       let cursor = used.entry(name.clone()).or_insert(0);
@@ -133,18 +140,18 @@ pub fn convert_to_markdown(
       let geometry = document.pages().get(index).copied().ok_or_else(|| Error::Pdf {
         reason: format!("This PDF has no page {page}"),
       })?;
-      let bitmap = crate::pdf::render_region(
-        document,
-        index,
-        geometry.padded(rect, FIGURE_PAD),
-        FIGURE_SCALE,
-        MAX_FIGURE_EDGE,
-      )?;
+      if raster.is_none() {
+        raster = Some(render_page_figures(document, index)?);
+      }
+      let Some((bitmap, scale)) = raster.as_ref() else {
+        continue;
+      };
+      let crop = crop_page(bitmap, geometry.to_display(geometry.padded(rect, FIGURE_PAD)), *scale)?;
       on_page = on_page.saturating_add(1);
       let relative_path = format!("{directory}/p{page:03}-{on_page:02}.png");
       figures.push(Figure {
         relative_path: relative_path.clone(),
-        png: encode_png(&bitmap)?,
+        png: encode_png(crop)?,
       });
       links.push(relative_path);
     }
@@ -286,11 +293,10 @@ pub(crate) fn substitute_figures(markdown: &str, links: &[String]) -> String {
 }
 
 /// Encode a rendered crop as PNG.
-fn encode_png(bitmap: &PageBitmap) -> Result<Vec<u8>, Error> {
-  let buffer =
-    image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.rgba.clone()).ok_or_else(|| Error::Pdf {
-      reason: "A figure could not be encoded".to_owned(),
-    })?;
+fn encode_png(bitmap: PageBitmap) -> Result<Vec<u8>, Error> {
+  let buffer = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.rgba).ok_or_else(|| Error::Pdf {
+    reason: "A figure could not be encoded".to_owned(),
+  })?;
   let mut png = Vec::new();
   image::DynamicImage::ImageRgba8(buffer)
     .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)

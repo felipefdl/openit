@@ -5,6 +5,7 @@
 //! it through [`crate::pdf::PageGeometry::to_display`] before painting.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use pdf_inspector::types::ItemType;
 use unicode_normalization::UnicodeNormalization as _;
@@ -97,10 +98,18 @@ pub struct PageText {
 }
 
 /// Every page's text.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TextLayer {
   /// One entry per page, in document order. A page without text is empty.
   pub pages: Vec<PageText>,
+  /// Folded haystack, built once on first search.
+  haystack: OnceLock<Vec<PageHaystack>>,
+}
+
+impl PartialEq for TextLayer {
+  fn eq(&self, other: &Self) -> bool {
+    self.pages == other.pages
+  }
 }
 
 impl TextLayer {
@@ -116,6 +125,17 @@ impl TextLayer {
 
   fn line(&self, page: usize, line: usize) -> Option<&TextLine> {
     self.pages.get(page)?.lines.get(line)
+  }
+
+  fn haystack(&self) -> &[PageHaystack] {
+    self.haystack.get_or_init(|| {
+      self
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| page_haystack(index, page))
+        .collect()
+    })
   }
 }
 
@@ -145,8 +165,10 @@ pub struct Match {
 
 /// Read every text run of the document.
 ///
-/// An encrypted document has to be read from `path`, because the extractor's
-/// in-memory entry point takes no password.
+/// An encrypted document is re-read from `path`. pdf-inspector 1.19.0 exposes
+/// `extract_text_with_positions_mem` without a password and
+/// `extract_text_with_positions_pages_with_password` only on a path; there is no
+/// in-memory extract-with-password entry point.
 ///
 /// # Errors
 ///
@@ -188,7 +210,7 @@ pub fn text_layer(path: &Path, bytes: &[u8], password: Option<&str>, page_count:
   for (page, runs) in pages.iter_mut().zip(by_page) {
     page.lines = group_lines(runs);
   }
-  Ok(TextLayer { pages })
+  Ok(TextLayer { pages, ..TextLayer::default() })
 }
 
 /// Group runs into lines by baseline, each line ordered left to right.
@@ -242,93 +264,95 @@ pub fn fold(text: &str) -> Vec<(char, usize)> {
   out
 }
 
-/// One entry of a page's search stream: a folded character and where it came
-/// from. A separator inserted between runs or lines has no position.
-struct Entry {
-  ch: char,
-  at: Option<TextPos>,
+/// Folded characters of one page and the source position of each.
+#[derive(Debug, Clone)]
+struct PageHaystack {
+  folded: String,
+  at: Vec<Option<TextPos>>,
 }
 
-/// Build the folded stream of one page: runs joined by a space, lines joined by
-/// a space unless the previous line ends in a hyphen, which is dropped so the
-/// split word reads as one.
-fn page_stream(page_index: usize, page: &PageText) -> Vec<Entry> {
-  let mut stream: Vec<Entry> = Vec::new();
+/// Build the folded haystack of one page: runs joined by a space, lines joined
+/// by a space unless the previous line ends in a hyphen, which is dropped so
+/// the split word reads as one.
+fn page_haystack(page_index: usize, page: &PageText) -> PageHaystack {
+  let mut folded = String::new();
+  let mut at = Vec::new();
   for (line_index, line) in page.lines.iter().enumerate() {
-    if !stream.is_empty() {
-      let hyphenated = matches!(stream.last(), Some(entry) if entry.ch == '-')
+    if !folded.is_empty() {
+      let hyphenated = folded.ends_with('-')
         && line
           .runs
           .first()
           .and_then(|run| run.text.chars().next())
           .is_some_and(char::is_alphabetic);
       if hyphenated {
-        stream.pop();
+        folded.pop();
+        at.pop();
       } else {
-        push_separator(&mut stream);
+        push_separator(&mut folded, &mut at);
       }
     }
     for (run_index, run) in line.runs.iter().enumerate() {
       if run_index > 0 {
-        push_separator(&mut stream);
+        push_separator(&mut folded, &mut at);
       }
       for (ch, source) in fold(&run.text) {
-        stream.push(Entry {
-          ch,
-          at: Some(TextPos {
-            page: page_index,
-            line: line_index,
-            run: run_index,
-            ch: source,
-          }),
-        });
+        folded.push(ch);
+        at.push(Some(TextPos {
+          page: page_index,
+          line: line_index,
+          run: run_index,
+          ch: source,
+        }));
       }
     }
   }
-  stream
+  PageHaystack { folded, at }
 }
 
-fn push_separator(stream: &mut Vec<Entry>) {
-  if stream.last().is_none_or(|entry| entry.ch != ' ') {
-    stream.push(Entry { ch: ' ', at: None });
+fn push_separator(folded: &mut String, at: &mut Vec<Option<TextPos>>) {
+  if !folded.ends_with(' ') {
+    folded.push(' ');
+    at.push(None);
   }
 }
 
 /// Search every page. Matching folds case, ligatures, accents, whitespace, and
-/// end-of-line hyphenation.
+/// end-of-line hyphenation. The haystack is folded once per layer; only the
+/// needle is folded per query.
 #[must_use]
 pub fn search(layer: &TextLayer, query: &str) -> Vec<Match> {
-  let needle: Vec<char> = fold(query.trim()).into_iter().map(|(ch, _)| ch).collect();
+  let needle: String = fold(query.trim()).into_iter().map(|(ch, _)| ch).collect();
   if needle.is_empty() {
     return Vec::new();
   }
+  let needle_chars = needle.chars().count();
   let mut hits = Vec::new();
-  for (page_index, page) in layer.pages.iter().enumerate() {
-    let stream = page_stream(page_index, page);
-    if stream.len() < needle.len() {
+  for hay in layer.haystack() {
+    if hay.at.len() < needle_chars {
       continue;
     }
-    let last_start = stream.len().saturating_sub(needle.len());
-    let mut index = 0;
-    while index <= last_start {
-      let matched = stream
-        .get(index..index.saturating_add(needle.len()))
-        .is_some_and(|window| window.iter().map(|entry| entry.ch).eq(needle.iter().copied()));
-      if !matched {
-        index = index.saturating_add(1);
-        continue;
-      }
-      let window = stream.get(index..index.saturating_add(needle.len())).unwrap_or_default();
-      let start = window.iter().find_map(|entry| entry.at);
-      let end_entry = window.iter().rev().find_map(|entry| entry.at);
-      if let (Some(start), Some(last)) = (start, end_entry) {
+    let mut byte = 0_usize;
+    let mut char_index = 0_usize;
+    while let Some(rest) = hay.folded.get(byte..) {
+      let Some(found) = rest.find(&needle) else {
+        break;
+      };
+      let skipped = rest.get(..found).map_or(0, |skipped| skipped.chars().count());
+      let start_char = char_index.saturating_add(skipped);
+      let end_char = start_char.saturating_add(needle_chars);
+      let window = hay.at.get(start_char..end_char).unwrap_or_default();
+      let start = window.iter().copied().find_map(|entry| entry);
+      let last = window.iter().rev().copied().find_map(|entry| entry);
+      if let (Some(start), Some(last)) = (start, last) {
         hits.push(Match {
           start,
           end: after(layer, last),
           context: context_for(layer, start, last),
         });
       }
-      index = index.saturating_add(needle.len());
+      byte = byte.saturating_add(found).saturating_add(needle.len());
+      char_index = end_char;
     }
   }
   hits
@@ -630,8 +654,8 @@ fn round_to_usize(value: f32) -> usize {
 #[cfg(test)]
 mod tests {
   use super::{
-    Match, PageText, TextLayer, TextLine, TextPos, TextRun, document_range, fold, position_at, rects_between, search,
-    text_between, text_layer, word_at,
+    Match, PageText, TextLayer, TextLine, TextPos, TextRun, after, context_for, document_range, fold, page_haystack,
+    position_at, rects_between, search, text_between, text_layer, word_at,
   };
   use crate::pdf::RectPt;
   use crate::pdf::test_support::tiny_pdf_pages;
@@ -666,6 +690,7 @@ mod tests {
           page
         })
         .collect(),
+      ..TextLayer::default()
     }
   }
 
@@ -810,6 +835,58 @@ mod tests {
     assert!(text.contains("second page"), "{text}");
     assert_eq!(search(&layer, "hello world").len(), 1);
     assert_eq!(search(&layer, "second").len(), 1);
+  }
+
+  #[test]
+  fn folded_haystack_search_matches_the_scan_on_the_fixture() {
+    let bytes = tiny_pdf_pages(&["Hello World", "second page", "Configuracao file"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let layer = text_layer(&path, &bytes, None, 3).unwrap();
+
+    for query in ["hello world", "second", "configuracao", "HELLO", "nope", "  "] {
+      assert_eq!(search(&layer, query), search_by_scan(&layer, query), "{query}");
+    }
+  }
+
+  /// The previous O(n*m) scan, kept to pin haystack search to the same hits.
+  fn search_by_scan(layer: &TextLayer, query: &str) -> Vec<Match> {
+    let needle: Vec<char> = fold(query.trim()).into_iter().map(|(ch, _)| ch).collect();
+    if needle.is_empty() {
+      return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for (page_index, page) in layer.pages.iter().enumerate() {
+      let hay = page_haystack(page_index, page);
+      let chars: Vec<char> = hay.folded.chars().collect();
+      if chars.len() < needle.len() {
+        continue;
+      }
+      let last_start = chars.len().saturating_sub(needle.len());
+      let mut index = 0;
+      while index <= last_start {
+        let matched = chars
+          .get(index..index.saturating_add(needle.len()))
+          .is_some_and(|window| window.iter().copied().eq(needle.iter().copied()));
+        if !matched {
+          index = index.saturating_add(1);
+          continue;
+        }
+        let window = hay.at.get(index..index.saturating_add(needle.len())).unwrap_or_default();
+        let start = window.iter().copied().find_map(|entry| entry);
+        let last = window.iter().rev().copied().find_map(|entry| entry);
+        if let (Some(start), Some(last)) = (start, last) {
+          hits.push(Match {
+            start,
+            end: after(layer, last),
+            context: context_for(layer, start, last),
+          });
+        }
+        index = index.saturating_add(needle.len());
+      }
+    }
+    hits
   }
 
   #[test]

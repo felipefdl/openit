@@ -1,7 +1,7 @@
 //! The PDF document surface: continuous pages, zoom, page navigation, and the
 //! password prompt.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,8 @@ const ZOOM_STEP: f32 = 1.25;
 const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 /// Pages rendered ahead of and behind the visible ones.
 const PREFETCH: usize = 1;
+/// In-flight `render_page` jobs kept at once.
+const MAX_RENDER_JOBS: usize = 4;
 
 /// How the pages are sized.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -188,13 +190,16 @@ pub struct PdfView {
   viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
   scroll: PageScroll,
   cache: PageCache,
-  render_tasks: HashMap<usize, Task<()>>,
+  render_tasks: HashMap<(usize, u32), Task<()>>,
+  render_scale_key: Option<u32>,
+  layout_cache: RefCell<Option<CachedLayout>>,
+  overlay_cache: Option<OverlayCache>,
   text: Text,
   text_task: Option<Task<()>>,
   find: Option<Entity<FindBar>>,
   find_subscription: Option<Subscription>,
   markdown_subscription: Option<Subscription>,
-  matches: Vec<Match>,
+  matches: Arc<[Match]>,
   current_match: Option<usize>,
   search_task: Option<Task<()>>,
   selection: Option<(TextPos, TextPos)>,
@@ -236,12 +241,15 @@ impl PdfView {
       scroll: PageScroll::default(),
       cache: PageCache::default(),
       render_tasks: HashMap::new(),
+      render_scale_key: None,
+      layout_cache: RefCell::new(None),
+      overlay_cache: None,
       text: Text::Pending,
       text_task: None,
       find: None,
       find_subscription: None,
       markdown_subscription: None,
-      matches: Vec::new(),
+      matches: Arc::from([]),
       current_match: None,
       search_task: None,
       selection: None,
@@ -386,6 +394,10 @@ impl PdfView {
     self.password = Some(password);
     self.load = Load::Opening;
     self.cache.clear();
+    self.render_tasks.clear();
+    self.render_scale_key = None;
+    self.layout_cache.replace(None);
+    self.overlay_cache = None;
     self.start_open(window, cx);
     cx.notify();
   }
@@ -498,7 +510,25 @@ impl PdfView {
   fn layout(&self) -> Option<(Layout, Bounds<Pixels>)> {
     let document = self.document()?;
     let viewport = self.viewport.get()?;
-    Some((layout(document.pages(), self.scale(), viewport.size.width), viewport))
+    let page_count = document.page_count();
+    let scale = self.scale();
+    let key = scale_key(scale);
+    let viewport_width = round_to_u32(f32::from(viewport.size.width));
+    if let Some(cached) = self.layout_cache.borrow().as_ref()
+      && cached.page_count == page_count
+      && cached.scale_key == key
+      && cached.viewport_width == viewport_width
+    {
+      return Some((cached.layout.clone(), viewport));
+    }
+    let laid = layout(document.pages(), scale, viewport.size.width);
+    self.layout_cache.replace(Some(CachedLayout {
+      page_count,
+      scale_key: key,
+      viewport_width,
+      layout: laid.clone(),
+    }));
+    Some((laid, viewport))
   }
 
   fn set_scroll(&mut self, y: Pixels, cx: &mut Context<Self>) {
@@ -591,7 +621,7 @@ impl PdfView {
   /// Every match of the current query.
   #[cfg(test)]
   pub(crate) fn matches(&self) -> &[Match] {
-    &self.matches
+    self.matches.as_ref()
   }
 
   /// Which match the reader is on.
@@ -607,7 +637,7 @@ impl PdfView {
   }
 
   /// The boxes of every match, keyed by page, in displayed points.
-  fn match_rects(&self) -> Overlays {
+  fn match_rects(&self, visible: Range<usize>) -> Overlays {
     let skip = self.current_match;
     self.overlay_rects(
       self
@@ -616,33 +646,74 @@ impl PdfView {
         .enumerate()
         .filter(|(index, _)| Some(*index) != skip)
         .map(|(_, hit)| (hit.start, hit.end)),
+      visible,
     )
   }
 
   /// The boxes of the match the reader is on.
-  fn current_match_rects(&self) -> Overlays {
+  fn current_match_rects(&self, visible: Range<usize>) -> Overlays {
     self.overlay_rects(
       self
         .current_match
         .and_then(|index| self.matches.get(index))
         .map(|hit| (hit.start, hit.end))
         .into_iter(),
+      visible,
     )
   }
 
   /// The boxes of the selection.
-  fn selection_rects(&self) -> Overlays {
-    self.overlay_rects(self.selection.into_iter())
+  fn selection_rects(&self, visible: Range<usize>) -> Overlays {
+    self.overlay_rects(self.selection.into_iter(), visible)
   }
 
-  /// Map item-frame ranges into displayed boxes per page.
-  fn overlay_rects(&self, ranges: impl Iterator<Item = (TextPos, TextPos)>) -> Overlays {
+  /// Cached overlay boxes for the pages currently in view.
+  fn overlays_for(&mut self, visible: Range<usize>) -> (Overlays, Overlays, Overlays) {
+    let key = scale_key(self.scale());
+    let reuse = self.overlay_cache.as_ref().is_some_and(|cache| {
+      Arc::ptr_eq(&cache.matches, &self.matches)
+        && cache.current == self.current_match
+        && cache.selection == self.selection
+        && cache.scale_key == key
+        && cache.visible == visible
+    });
+    if reuse && let Some(cache) = &self.overlay_cache {
+      return (
+        cache.match_overlays.clone(),
+        cache.current_overlays.clone(),
+        cache.selection_overlays.clone(),
+      );
+    }
+    let match_overlays = self.match_rects(visible.clone());
+    let current_overlays = self.current_match_rects(visible.clone());
+    let selection_overlays = self.selection_rects(visible.clone());
+    self.overlay_cache = Some(OverlayCache {
+      matches: Arc::clone(&self.matches),
+      current: self.current_match,
+      selection: self.selection,
+      scale_key: key,
+      visible,
+      match_overlays: match_overlays.clone(),
+      current_overlays: current_overlays.clone(),
+      selection_overlays: selection_overlays.clone(),
+    });
+    (match_overlays, current_overlays, selection_overlays)
+  }
+
+  /// Map item-frame ranges into displayed boxes per visible page.
+  fn overlay_rects(&self, ranges: impl Iterator<Item = (TextPos, TextPos)>, visible: Range<usize>) -> Overlays {
     let mut overlays: Overlays = HashMap::new();
     let Some((layer, document)) = self.layer().zip(self.document()) else {
       return overlays;
     };
     for (start, end) in ranges {
+      if end.page < visible.start || start.page >= visible.end {
+        continue;
+      }
       for (page, rect) in pdf_text::rects_between(layer, start, end) {
+        if !visible.contains(&page) {
+          continue;
+        }
         let Some(geometry) = document.pages().get(page) else {
           continue;
         };
@@ -845,9 +916,10 @@ impl PdfView {
   fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.find = None;
     self.find_subscription = None;
-    self.matches.clear();
+    self.matches = Arc::from([]);
     self.current_match = None;
     self.search_task = None;
+    self.overlay_cache = None;
     window.focus(&self.focus, cx);
     cx.notify();
   }
@@ -865,7 +937,8 @@ impl PdfView {
           return;
         }
         let first = (!hits.is_empty()).then_some(0);
-        view.matches = hits;
+        view.matches = Arc::from(hits);
+        view.overlay_cache = None;
         view.set_current_match(first, cx);
       });
     }));
@@ -874,11 +947,15 @@ impl PdfView {
   /// Make `index` the current match, scroll it into view, and tell the bar.
   fn set_current_match(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
     self.current_match = index.filter(|index| *index < self.matches.len());
-    if let Some(hit) = self.current_match.and_then(|index| self.matches.get(index)).cloned() {
-      self.scroll_into_view(hit.start, cx);
+    if let Some(start) = self
+      .current_match
+      .and_then(|index| self.matches.get(index))
+      .map(|hit| hit.start)
+    {
+      self.scroll_into_view(start, cx);
     }
     if let Some(find) = self.find.clone() {
-      let matches = self.matches.clone();
+      let matches = Arc::clone(&self.matches);
       let current = self.current_match;
       find.update(cx, |find, cx| find.set_results(matches, current, cx));
     }
@@ -1163,19 +1240,27 @@ impl PdfView {
     let device_scale = window.scale_factor();
     let scale = self.scale() * device_scale;
     let key = scale_key(scale);
+    if self.render_scale_key != Some(key) {
+      self.cache.retain_scales(key, self.render_scale_key);
+      self.render_tasks.retain(|(_, task_key), _| *task_key == key);
+      self.render_scale_key = Some(key);
+    }
     let generation = self.generation;
     // Visible pages are queued before the prefetch ones, so they land first.
     let order = visible.clone().chain((first..last).filter(|page| !visible.contains(page)));
     for page in order {
-      if self.cache.has(page, key) || self.render_tasks.contains_key(&page) {
+      if self.cache.has(page, key) || self.render_tasks.contains_key(&(page, key)) {
         continue;
+      }
+      if self.render_tasks.len() >= MAX_RENDER_JOBS {
+        break;
       }
       let document = Arc::clone(&document);
       let handle = self.window_handle;
       let task = cx.spawn(async move |view, cx| {
         let rendered = cx.background_spawn(async move { render_page(&document, page, scale) }).await;
         let applied = view.update(cx, |view, _| {
-          view.render_tasks.remove(&page);
+          view.render_tasks.remove(&(page, key));
           if view.generation != generation {
             return false;
           }
@@ -1203,7 +1288,7 @@ impl PdfView {
           tracing::debug!(%error, "the window closed before a page could be painted");
         }
       });
-      self.render_tasks.insert(page, task);
+      self.render_tasks.insert((page, key), task);
     }
   }
 
@@ -1341,20 +1426,26 @@ impl PdfView {
     // The scrollbar reads the reader's position, and a drag on its thumb writes
     // back into the same cell for the next frame.
     let scroll = self.scroll.clone();
-    if let Some((layout, viewport)) = self.layout() {
-      scroll.publish(viewport, size(viewport.size.width, layout.total_height));
+    let laid_out = self.layout();
+    if let Some((layout, viewport)) = &laid_out {
+      scroll.publish(*viewport, size(viewport.size.width, layout.total_height));
     }
+    let visible = laid_out.as_ref().map_or(0..0, |(layout, viewport)| {
+      visible_pages(layout, self.scroll_y, viewport.size.height)
+    });
+    let (match_overlays, current_overlays, selection_overlays) = self.overlays_for(visible);
     let (background, paper, shadow) = (theme.background, gpui_kit::white(), theme.foreground.opacity(0.18));
     let viewport = Rc::clone(&self.viewport);
     let plan = PlanSource {
       pages: self.document().map(|document| document.pages().to_vec()).unwrap_or_default(),
+      layout: laid_out.map(|(layout, _)| layout),
       scale: self.scale(),
       resolves_fit: matches!(self.zoom, Zoom::FitWidth),
       scroll_y: self.scroll_y,
       images: self.cache.snapshot(scale_key(self.scale() * window.scale_factor())),
-      matches: self.match_rects(),
-      current_match: self.current_match_rects(),
-      selection: self.selection_rects(),
+      matches: match_overlays,
+      current_match: current_overlays,
+      selection: selection_overlays,
     };
     let overlay_colors = OverlayColors {
       selection: theme.accent.opacity(0.4),
@@ -1404,17 +1495,20 @@ impl PdfView {
 
   /// A window close from the platform runs through the same path.
   fn install_close_guard(window: &Window, cx: &Context<Self>) {
-    let entity = cx.entity();
+    // Weak: the platform window outlives the close in gpui-pre, and a strong entity here would keep the document alive with it.
+    let entity = cx.entity().downgrade();
     window.on_window_should_close(cx, move |window, cx| {
-      entity.update(cx, |view, cx| {
-        let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
-        if view.closing && (quitting || view.close_decided) {
-          true
-        } else {
-          view.request_close(window, cx);
-          false
-        }
-      })
+      entity
+        .update(cx, |view, cx| {
+          let quitting = cx.try_global::<crate::QuitCommitted>().is_some_and(|quit| quit.0);
+          if view.closing && (quitting || view.close_decided) {
+            true
+          } else {
+            view.request_close(window, cx);
+            false
+          }
+        })
+        .unwrap_or(true)
     });
   }
 
@@ -1491,6 +1585,9 @@ impl PdfView {
             view.generation = view.generation.saturating_add(1);
             view.cache.clear();
             view.render_tasks.clear();
+            view.render_scale_key = None;
+            view.layout_cache.replace(None);
+            view.overlay_cache = None;
             view.load = Load::Opening;
             view.start_open(window, cx);
           },
@@ -1595,7 +1692,7 @@ impl Render for PdfView {
   }
 }
 
-/// Rendered pages, evicted oldest first under a byte budget.
+/// Rendered pages, evicted least-recently used under a byte budget.
 #[derive(Default)]
 struct PageCache {
   entries: HashMap<(usize, u32), CachedPage>,
@@ -1611,6 +1708,14 @@ struct CachedPage {
 impl PageCache {
   fn has(&self, page: usize, key: u32) -> bool {
     self.entries.contains_key(&(page, key))
+  }
+
+  fn touch(&mut self, page: usize, key: u32) {
+    let entry = (page, key);
+    if let Some(index) = self.order.iter().position(|item| *item == entry) {
+      self.order.remove(index);
+      self.order.push_back(entry);
+    }
   }
 
   fn insert(&mut self, page: usize, key: u32, image: Arc<gpui_kit::RenderImage>, bytes: usize) {
@@ -1630,19 +1735,35 @@ impl PageCache {
     }
   }
 
+  /// Keep only the current scale and the previous one used as a placeholder.
+  fn retain_scales(&mut self, current: u32, previous: Option<u32>) {
+    self.order.retain(|entry| {
+      let keep = entry.1 == current || previous == Some(entry.1);
+      if !keep && let Some(cached) = self.entries.remove(entry) {
+        self.bytes = self.bytes.saturating_sub(cached.bytes);
+      }
+      keep
+    });
+  }
+
   /// The image for every cached page: the one rendered at `key` when it exists,
   /// otherwise any other scale, which the painter stretches until the right one
   /// arrives.
-  fn snapshot(&self, key: u32) -> HashMap<usize, Arc<gpui_kit::RenderImage>> {
-    let mut best: HashMap<usize, (bool, Arc<gpui_kit::RenderImage>)> = HashMap::new();
+  fn snapshot(&mut self, key: u32) -> HashMap<usize, Arc<gpui_kit::RenderImage>> {
+    let mut best: HashMap<usize, (bool, u32, Arc<gpui_kit::RenderImage>)> = HashMap::new();
     for ((page, entry_key), entry) in &self.entries {
       let exact = *entry_key == key;
-      let replace = best.get(page).is_none_or(|(was_exact, _)| exact && !was_exact);
+      let replace = best.get(page).is_none_or(|(was_exact, _, _)| exact && !was_exact);
       if replace {
-        best.insert(*page, (exact, Arc::clone(&entry.image)));
+        best.insert(*page, (exact, *entry_key, Arc::clone(&entry.image)));
       }
     }
-    best.into_iter().map(|(page, (_, image))| (page, image)).collect()
+    let out: HashMap<usize, Arc<gpui_kit::RenderImage>> =
+      best.iter().map(|(page, (_, _, image))| (*page, Arc::clone(image))).collect();
+    for (page, (_, entry_key, _)) in best {
+      self.touch(page, entry_key);
+    }
+    out
   }
 
   fn clear(&mut self) {
@@ -1658,9 +1779,30 @@ fn scale_key(scale: f32) -> u32 {
 }
 
 /// Where every page sits, in window pixels relative to the top of the document.
+#[derive(Clone)]
 pub(crate) struct Layout {
   pub(crate) pages: Vec<Bounds<Pixels>>,
   pub(crate) total_height: Pixels,
+}
+
+/// A stacked layout kept until page count, scale, or viewport width change.
+struct CachedLayout {
+  page_count: usize,
+  scale_key: u32,
+  viewport_width: u32,
+  layout: Layout,
+}
+
+/// Overlay boxes kept until matches, scale, or the visible page range change.
+struct OverlayCache {
+  matches: Arc<[Match]>,
+  current: Option<usize>,
+  selection: Option<(TextPos, TextPos)>,
+  scale_key: u32,
+  visible: Range<usize>,
+  match_overlays: Overlays,
+  current_overlays: Overlays,
+  selection_overlays: Overlays,
 }
 
 /// Stack the pages with a gap above, below, and between, each centered.
@@ -1744,6 +1886,7 @@ type Overlays = HashMap<usize, Vec<DisplayRect>>;
 /// The view state one painted frame reads, captured before layout.
 struct PlanSource {
   pages: Vec<PageGeometry>,
+  layout: Option<Layout>,
   scale: f32,
   resolves_fit: bool,
   scroll_y: Pixels,
@@ -1763,11 +1906,17 @@ impl PlanSource {
     } else {
       self.scale
     };
-    let layout = layout(&self.pages, scale, viewport.size.width);
-    let visible = visible_pages(&layout, self.scroll_y, viewport.size.height);
+    let laid = if let Some(cached) = &self.layout
+      && (scale - self.scale).abs() < f32::EPSILON
+    {
+      cached.clone()
+    } else {
+      layout(&self.pages, scale, viewport.size.width)
+    };
+    let visible = visible_pages(&laid, self.scroll_y, viewport.size.height);
     let mut plan = Vec::new();
     for page in visible {
-      let Some(bounds) = layout.pages.get(page) else {
+      let Some(bounds) = laid.pages.get(page) else {
         continue;
       };
       let origin = Point {
@@ -1855,8 +2004,12 @@ fn place(rect: DisplayRect, origin: Point<Pixels>, scale: f32) -> Bounds<Pixels>
 
 /// Pack a rendered page for painting: BGRA, edge-capped, one frame.
 fn to_render_image(bitmap: openit_core::pdf::PageBitmap) -> Option<Arc<gpui_kit::RenderImage>> {
-  let buffer = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.rgba)?;
-  let frame = image::Frame::new(image_decode::fit(buffer));
+  let mut rgba = bitmap.rgba;
+  for pixel in rgba.as_chunks_mut::<4>().0 {
+    pixel.swap(0, 2);
+  }
+  let buffer = image::RgbaImage::from_raw(bitmap.width, bitmap.height, rgba)?;
+  let frame = image::Frame::new(buffer);
   Some(image_decode::to_render_image(vec![frame]))
 }
 
@@ -2484,6 +2637,28 @@ mod tests {
     assert!(!cache.has(0, 1000), "the oldest entry is evicted");
     assert!(cache.has(2, 1000));
     assert!(cache.bytes <= MAX_CACHE_BYTES + big);
+  }
+
+  #[core::prelude::v1::test]
+  fn the_page_cache_evicts_in_lru_order() {
+    let mut cache = PageCache::default();
+    let image = || {
+      crate::image_decode::to_render_image(vec![image::Frame::new(image::RgbaImage::from_pixel(
+        1,
+        1,
+        image::Rgba([0, 0, 0, 255]),
+      ))])
+    };
+    let chunk = MAX_CACHE_BYTES / 3 + 1;
+
+    cache.insert(0, 1000, image(), chunk);
+    cache.insert(1, 1000, image(), chunk);
+    cache.touch(0, 1000);
+    cache.insert(2, 1000, image(), chunk);
+
+    assert!(cache.has(0, 1000), "a recently touched entry is kept");
+    assert!(!cache.has(1, 1000), "the least recently used entry is evicted");
+    assert!(cache.has(2, 1000));
   }
 
   #[core::prelude::v1::test]

@@ -48,6 +48,8 @@ impl DocumentKind {
 pub const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
 
 /// Code extensions paired with their gpui-kit grammar name.
+///
+/// `jsdoc` is compiled in as an injection grammar, not a file type, so it has no mapping here.
 pub(crate) const CODE_LANGUAGES: &[(&str, &str)] = &[
   ("rs", "rust"),
   ("ts", "typescript"),
@@ -96,6 +98,14 @@ pub(crate) const CODE_LANGUAGES: &[(&str, &str)] = &[
   ("gql", "graphql"),
   ("proto", "proto"),
   ("zig", "zig"),
+  ("astro", "astro"),
+  ("cmake", "cmake"),
+  ("diff", "diff"),
+  ("patch", "diff"),
+  ("ejs", "ejs"),
+  ("erb", "erb"),
+  ("mk", "make"),
+  ("svelte", "svelte"),
 ];
 
 /// Text extensions with no dedicated grammar.
@@ -107,7 +117,7 @@ pub const TEXT_EXTENSIONS: &[&str] = &[
   "rs", "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc", "json5", "html", "htm", "css", "scss",
   "less", "toml", "yaml", "yml", "py", "go", "sh", "bash", "zsh", "sql", "java", "kt", "kts", "swift", "c", "h", "cpp",
   "cc", "cxx", "hpp", "cs", "rb", "php", "lua", "scala", "ex", "exs", "graphql", "gql", "proto", "zig", "txt", "text",
-  "log", "csv", "env", "ini", "cfg", "conf", "xml",
+  "log", "csv", "env", "ini", "cfg", "conf", "xml", "astro", "cmake", "diff", "patch", "ejs", "erb", "mk", "svelte",
 ];
 
 /// Raster image extensions the image crate reads.
@@ -157,7 +167,9 @@ pub fn detect(path: &Path) -> DocumentKind {
 
 fn by_filename(name: &str) -> Option<DocumentKind> {
   let language = match name {
-    "Dockerfile" | "justfile" | "Justfile" | "Makefile" => Some("bash"),
+    "Dockerfile" | "justfile" | "Justfile" => Some("bash"),
+    "Makefile" | "makefile" | "GNUmakefile" => Some("make"),
+    "CMakeLists.txt" => Some("cmake"),
     "LICENSE" | "README" | "CHANGELOG" | "NOTICE" => None,
     _ => return None,
   };
@@ -213,6 +225,28 @@ mod tests {
     assert_eq!(detect(Path::new("Dockerfile")), DocumentKind::Text { language: Some("bash") });
     assert_eq!(detect(Path::new("justfile")), DocumentKind::Text { language: Some("bash") });
     assert_eq!(detect(Path::new("LICENSE")), DocumentKind::Text { language: None });
+  }
+
+  #[test]
+  fn additional_grammars_map_from_extension_and_filename() {
+    assert_eq!(detect(Path::new("page.astro")), DocumentKind::Text { language: Some("astro") });
+    assert_eq!(
+      detect(Path::new("CMakeLists.txt")),
+      DocumentKind::Text { language: Some("cmake") }
+    );
+    assert_eq!(detect(Path::new("build.cmake")), DocumentKind::Text { language: Some("cmake") });
+    assert_eq!(detect(Path::new("changes.diff")), DocumentKind::Text { language: Some("diff") });
+    assert_eq!(
+      detect(Path::new("changes.patch")),
+      DocumentKind::Text { language: Some("diff") }
+    );
+    assert_eq!(detect(Path::new("view.ejs")), DocumentKind::Text { language: Some("ejs") });
+    assert_eq!(detect(Path::new("form.erb")), DocumentKind::Text { language: Some("erb") });
+    assert_eq!(detect(Path::new("App.svelte")), DocumentKind::Text { language: Some("svelte") });
+    assert_eq!(detect(Path::new("Makefile")), DocumentKind::Text { language: Some("make") });
+    assert_eq!(detect(Path::new("makefile")), DocumentKind::Text { language: Some("make") });
+    assert_eq!(detect(Path::new("GNUmakefile")), DocumentKind::Text { language: Some("make") });
+    assert_eq!(detect(Path::new("rules.mk")), DocumentKind::Text { language: Some("make") });
   }
 
   #[test]

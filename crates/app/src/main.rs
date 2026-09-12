@@ -74,6 +74,36 @@ pub(crate) struct QuitCommitted(pub(crate) bool);
 
 impl Global for QuitCommitted {}
 
+struct LastWindowQuitSubscription {
+  _subscription: Subscription,
+}
+
+impl Global for LastWindowQuitSubscription {}
+
+/// App-level last-window observer. Captures no entities: gpui-pre keeps a closed
+/// window's platform state, and a strong view here would leak the document with it.
+pub(crate) fn install_last_window_quit(cx: &mut App) {
+  cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+  cx.default_global::<QuitInProgress>();
+  cx.default_global::<QuitCommitted>();
+  cx.default_global::<PendingCleanups>();
+  if cx.has_global::<LastWindowQuitSubscription>() {
+    return;
+  }
+  let subscription = cx.on_window_closed(on_last_window_closed);
+  cx.set_global(LastWindowQuitSubscription { _subscription: subscription });
+}
+
+fn on_last_window_closed(cx: &mut App, _: gpui_kit::WindowId) {
+  if cx.try_global::<QuitInProgress>().is_some_and(|quit| quit.0) {
+    return;
+  }
+  if !crate::handoff::should_quit_after_last_window(cx) {
+    return;
+  }
+  request_quit(cx).detach();
+}
+
 /// One window that takes part in the quit gate.
 trait QuitParticipant: 'static + gpui_kit::Render + Sized {
   /// Start closing; returns whether the window was already closing.
@@ -661,6 +691,7 @@ fn attach_app_handlers(cx: &mut App) {
     }
   });
   cx.set_global(AppQuitSubscription { _subscription: on_quit });
+  install_last_window_quit(cx);
   cx.on_action(|action: &actions::SetThemeMode, cx| handle_set_theme_mode(action, cx));
   cx.on_action(|action: &actions::SetMarkdownPreviewWidth, cx| handle_set_markdown_preview_width(action, cx));
   cx.on_action(|_: &actions::ToggleAlwaysShowStatusBar, cx| handle_toggle_always_show_status_bar(cx));
@@ -683,7 +714,9 @@ fn run_app(paths: Vec<PathBuf>) {
   #[cfg(unix)]
   cli::hand_off_under_product_name();
 
-  let app = gpui_kit::application().with_assets(assets::AppAssets);
+  let app = gpui_kit::application()
+    .with_assets(assets::AppAssets)
+    .with_quit_mode(gpui_kit::QuitMode::Explicit);
   let (open_url_tx, open_url_rx) = async_channel::unbounded();
   app.on_open_urls(move |urls| {
     if open_url_tx.send_blocking(urls).is_err() {

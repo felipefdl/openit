@@ -310,12 +310,44 @@ fn rasterize(document: &PdfDocument, page: usize, scale: f32, crop: Option<Displ
     });
   }
   // The page is composited over opaque white, so premultiplied and straight
-  // alpha agree and the bytes need no per-pixel conversion.
-  let rgba = pixmap.data_as_u8_slice();
+  // alpha agree and the bytes need no per-pixel conversion. Take the pixmap
+  // buffer so the pixels are not copied off a borrow.
+  let rgba = pixmap_rgba(pixmap);
   let Some(crop) = crop else {
-    return Ok(PageBitmap { page, width, height, rgba: rgba.to_vec() });
+    return Ok(PageBitmap { page, width, height, rgba });
   };
-  crop_rgba(page, rgba, width, height, crop, scale)
+  crop_rgba(page, &rgba, width, height, crop, scale)
+}
+
+/// Consume hayro's pixmap into a row-major RGBA8 buffer.
+fn pixmap_rgba(pixmap: hayro::vello_cpu::Pixmap) -> Vec<u8> {
+  let pixels = pixmap.take();
+  let mut rgba = Vec::with_capacity(pixels.len().saturating_mul(4));
+  for pixel in pixels {
+    rgba.extend_from_slice(&pixel.to_u8_array());
+  }
+  rgba
+}
+
+/// Rasterize `page` at the figure scale, capped on the page's longest edge.
+///
+/// # Errors
+///
+/// Returns [`Error::Pdf`] when the page does not exist or renders empty.
+pub fn render_page_figures(document: &PdfDocument, page: usize) -> Result<(PageBitmap, f32), Error> {
+  let geometry = *document.pages.get(page).ok_or_else(|| missing_page(page))?;
+  let (width, height) = geometry.display_size();
+  let scale = capped_scale(FIGURE_SCALE, width.max(height), MAX_FIGURE_EDGE);
+  Ok((rasterize(document, page, scale, None)?, scale))
+}
+
+/// Copy the pixels under `crop` out of a rasterized page.
+///
+/// # Errors
+///
+/// Returns [`Error::Pdf`] when the crop is empty or outside the bitmap.
+pub fn crop_page(bitmap: &PageBitmap, crop: DisplayRect, scale: f32) -> Result<PageBitmap, Error> {
+  crop_rgba(bitmap.page, &bitmap.rgba, bitmap.width, bitmap.height, crop, scale)
 }
 
 /// Copy the pixels under `crop` out of a full-page bitmap.

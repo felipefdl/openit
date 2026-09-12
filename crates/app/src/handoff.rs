@@ -115,9 +115,23 @@ fn finish(cx: &mut App) {
   .detach();
 }
 
+/// Last-window close: Linux and Windows quit; macOS stays resident for Dock reopen.
+pub fn should_quit_after_last_window(cx: &App) -> bool {
+  let in_flight = cx.try_global::<Handoff>().map_or(0, |handoff| handoff.in_flight);
+  quits_when_empty(in_flight, cx.windows().len(), cfg!(target_os = "macos"))
+}
+
 /// A launch whose only outcome was a handoff has nothing to show and exits.
 const fn exits(in_flight: usize, handed_off: bool, windows: usize) -> bool {
-  in_flight == 0 && handed_off && windows == 0
+  empty_counts(in_flight, windows) && handed_off
+}
+
+const fn empty_counts(in_flight: usize, windows: usize) -> bool {
+  in_flight == 0 && windows == 0
+}
+
+const fn quits_when_empty(in_flight: usize, windows: usize, macos: bool) -> bool {
+  empty_counts(in_flight, windows) && !macos
 }
 
 /// Replaces the opener with one that records the paths it receives.
@@ -144,13 +158,24 @@ impl SystemOpener for Recorder {
 
 #[cfg(test)]
 mod tests {
-  use super::exits;
+  use super::{empty_counts, exits, quits_when_empty};
 
   #[test]
   fn only_a_finished_handoff_with_nothing_on_screen_exits() {
+    assert!(empty_counts(0, 0));
+    assert!(!empty_counts(1, 0), "another open request is still undecided");
+    assert!(!empty_counts(0, 1), "a window is open");
     assert!(exits(0, true, 0));
     assert!(!exits(1, true, 0), "another open request is still undecided");
     assert!(!exits(0, true, 1), "a window is open");
     assert!(!exits(0, false, 0), "a launch with nothing to open keeps running");
+  }
+
+  #[test]
+  fn last_window_quits_off_macos_and_stays_on_macos() {
+    assert!(!quits_when_empty(0, 0, true), "macOS stays resident with no windows");
+    assert!(quits_when_empty(0, 0, false), "Linux and Windows quit with no windows");
+    assert!(!quits_when_empty(1, 0, false), "an in-flight open keeps the process");
+    assert!(!quits_when_empty(0, 1, false), "a remaining window keeps the process");
   }
 }

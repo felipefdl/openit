@@ -319,12 +319,12 @@ impl DocumentSession {
             session,
             path: draft_path,
             disk,
-            text: snapshot.text.to_string(),
+            text: String::new(),
             cursor,
             image: None,
             schema,
           };
-          store.checkpoint(&draft)
+          store.checkpoint_text(&draft, &snapshot.text)
         })
         .await;
       let _ = entity.update(&mut app, |view, cx| match result {
@@ -645,7 +645,7 @@ impl DocumentSession {
     view.session.suppress_next_change = view.editor.is_some();
     match &view.editor {
       Some(editor) => editor.update(cx, |state, cx| state.replace_all(&text, window, cx)),
-      None => view.initial_text = Some(text),
+      None => view.initial_text = Some(Rope::from(text)),
     }
     view.session.mark_replaced();
     view.invalidate_preview();

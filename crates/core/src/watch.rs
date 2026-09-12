@@ -71,11 +71,15 @@ impl Fingerprint {
   }
   /// Read the fingerprint of an open file from its metadata.
   pub fn of_file(file: &File) -> std::io::Result<Self> {
-    let meta = file.metadata()?;
-    Ok(Self {
+    Ok(Self::from_metadata(&file.metadata()?))
+  }
+
+  /// Build from metadata already read from an open handle.
+  pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+    Self {
       len: meta.len(),
       modified: meta.modified().ok(),
-    })
+    }
   }
 }
 

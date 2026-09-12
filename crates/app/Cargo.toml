@@ -141,6 +141,7 @@ extensions = [
   "css", "scss", "less", "toml", "yaml", "yml", "py", "go", "sh", "bash", "zsh", "sql", "java", "kt",
   "kts", "swift", "c", "h", "cpp", "cc", "cxx", "hpp", "cs", "rb", "php", "lua", "scala", "ex", "exs",
   "graphql", "gql", "proto", "zig", "txt", "text", "log", "csv", "env", "ini", "cfg", "conf", "xml",
+  "astro", "cmake", "diff", "patch", "ejs", "erb", "mk", "svelte",
 ]
 role = "editor"
 mime-type = "text/plain"

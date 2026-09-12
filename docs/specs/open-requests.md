@@ -45,7 +45,7 @@ Stop and report: `interprocess` failing `cargo deny` or not building on one of t
 - New module in `crates/core`, no GPUI:
   - Name: `dirs::runtime_dir()/openit.sock` when XDG defines it, else `<data_local_dir>/openit/openit.sock`; on Windows `\\.\pipe\openit-<username>`.
   - Protocol: one connection per invocation. The client writes one JSON line `{"paths": ["/abs/a.md", ...]}` (an empty list asks for an empty window). The server dispatches and replies `ok` followed by a newline. Nothing else is ever written in either direction.
-  - `send(paths) -> Result<(), NoInstance>`: connect, write, read the reply, with at most 2 s for connect and 2 s for the reply. No socket, connection refused, timeout, or a reply that is not `ok` all mean "no running instance".
+  - `send(paths) -> Result<(), NoInstance>`: connect, write, read the reply, with at most 200 ms for connect and 2 s for the reply. No socket, connection refused, timeout, or a reply that is not `ok` all mean "no running instance". The short connect timeout keeps a stale socket from delaying a cold start.
   - `listen() -> Result<Listener, Error>`: bind; when the address is in use and a connect attempt fails, remove the stale file and bind once more. The listener yields one request per accepted connection and answers `ok` after the caller has taken the paths.
 - Done when:
   - A test starts a listener at a temp name, sends two paths, receives them in order, and the client gets `ok`.

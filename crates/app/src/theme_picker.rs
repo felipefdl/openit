@@ -1,12 +1,15 @@
 //! Color theme picker: a command palette that previews the highlighted theme and writes the pick to
 //! settings on confirm.
 
+use std::time::Duration;
+
 use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-  App, AppContext, Context, Entity, EventEmitter, IntoElement, MouseButton, Render, Window, WindowAppearance, div, px,
+  App, AppContext, Context, Entity, EventEmitter, IntoElement, MouseButton, Render, Task, Window, WindowAppearance,
+  div, px,
 };
 use openit_core::settings::ThemeMode;
 use openit_core::theme::ThemeKind;
@@ -17,6 +20,7 @@ use crate::theme::{ActivePalette, ThemeCatalog, ThemeEntry, apply_for_appearance
 const PLACEHOLDER: &str = "Select Color Theme";
 const DARK_THEMES: &str = "dark themes";
 const LIGHT_THEMES: &str = "light themes";
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(80);
 
 /// Filter by label substring and put the OS-preferred kind first.
 fn grouped(entries: &[ThemeEntry], query: &str, os_dark: bool) -> (Vec<ThemeEntry>, Vec<ThemeEntry>) {
@@ -88,6 +92,8 @@ pub struct ThemePicker {
   os_dark: bool,
   outcome: Outcome,
   needs_initial_selection: bool,
+  previewed_id: Option<String>,
+  preview_task: Option<Task<()>>,
 }
 
 impl EventEmitter<ThemePickerEvent> for ThemePicker {}
@@ -99,6 +105,7 @@ impl ThemePicker {
     let entries = ThemeCatalog::get(cx).entries.clone();
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.focus(window, cx));
+    let previewed_id = Some(current_id(cx));
     Self {
       state,
       entries,
@@ -106,6 +113,8 @@ impl ThemePicker {
       os_dark,
       outcome: Outcome::Open,
       needs_initial_selection: true,
+      previewed_id,
+      preview_task: None,
     }
   }
 
@@ -116,6 +125,7 @@ impl ThemePicker {
 
   /// Restore the configured theme unless the user confirmed a pick.
   pub fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.preview_task = None;
     match self.outcome {
       Outcome::Open => {
         self.outcome = Outcome::Cancelled;
@@ -142,29 +152,29 @@ impl ThemePicker {
     apply_theme(&entry.id, entry.kind, Some(window), cx);
   }
 
-  fn preview_at(&self, path: IndexPath, window: &mut Window, cx: &mut Context<Self>) {
-    if let Some(entry) = self.entry_at(path) {
-      Self::preview(&entry, window, cx);
+  fn preview_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(path) = self.state.read(cx).selected_index() else {
+      return;
+    };
+    let Some(entry) = self.entry_at(path) else {
+      return;
+    };
+    if self.previewed_id.as_deref() == Some(entry.id.as_str()) {
+      return;
     }
+    self.previewed_id = Some(entry.id.clone());
+    Self::preview(&entry, window, cx);
   }
 
-  fn schedule_preview(&self, window: &Window, cx: &mut Context<Self>) {
-    let state = self.state.clone();
-    let this = cx.entity().downgrade();
-    window.defer(cx, move |window, cx| {
-      let Some(path) = state.read(cx).selected_index() else {
-        return;
-      };
-      let _ = this.update(cx, |this, cx| this.preview_at(path, window, cx));
-    });
+  fn schedule_preview(&mut self, cx: &Context<Self>) {
+    self.preview_task = Some(cx.spawn(async move |this, cx| {
+      cx.background_executor().timer(PREVIEW_DEBOUNCE).await;
+      let _ = this.update_in(cx, Self::preview_selected);
+    }));
   }
 
-  fn on_query_change(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+  fn on_query_change(&mut self, query: &str, _: &mut Window, cx: &mut Context<Self>) {
     self.query = query.to_string();
-    let (first, second) = self.groups();
-    if let Some(entry) = first.first().or_else(|| second.first()) {
-      Self::preview(entry, window, cx);
-    }
     cx.notify();
   }
 
@@ -175,6 +185,8 @@ impl ThemePicker {
       return;
     };
     self.outcome = Outcome::Committed;
+    self.preview_task = None;
+    self.previewed_id = Some(entry.id.clone());
     Self::preview(&entry, window, cx);
     let os_dark = self.os_dark;
     SettingsStore::update(cx, |settings| {
@@ -290,8 +302,8 @@ impl Render for ThemePicker {
           .rounded_lg()
           .shadow_lg()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .capture_action(cx.listener(|this, _: &SelectUp, window, cx| this.schedule_preview(window, cx)))
-          .capture_action(cx.listener(|this, _: &SelectDown, window, cx| this.schedule_preview(window, cx)))
+          .capture_action(cx.listener(|this, _: &SelectUp, _, cx| this.schedule_preview(cx)))
+          .capture_action(cx.listener(|this, _: &SelectDown, _, cx| this.schedule_preview(cx)))
           .child(command),
       )
   }

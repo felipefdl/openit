@@ -164,6 +164,16 @@ fn window_holding_path(cx: &mut App, path: &Path, except: Option<AnyWindowHandle
   reason = "GPUI schedules work from a mutable application callback"
 )]
 pub fn apply_open_request(paths: Vec<PathBuf>, cx: &mut App) {
+  crate::handoff::started(cx);
+  apply_open_request_inner(paths, cx);
+  crate::handoff::settled(cx);
+}
+
+#[allow(
+  clippy::needless_pass_by_ref_mut,
+  reason = "GPUI schedules work from a mutable application callback"
+)]
+fn apply_open_request_inner(paths: Vec<PathBuf>, cx: &mut App) {
   cx.activate(true);
   if paths.is_empty() {
     focus_or_open_empty(cx);
@@ -642,6 +652,15 @@ mod tests {
     })
   }
 
+  fn close_last_window(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+      let Some(handle) = cx.windows().into_iter().next() else {
+        panic!("expected a window to close");
+      };
+      let _ = handle.update(cx, |_, window, _| window.remove_window());
+    });
+  }
+
   fn handed_off(recorded: &Arc<Mutex<Vec<PathBuf>>>) -> Vec<PathBuf> {
     recorded.lock().unwrap_or_else(PoisonError::into_inner).clone()
   }
@@ -1006,5 +1025,45 @@ mod tests {
 
     cx.update(on_reopen);
     assert_eq!(cx.windows().len(), 1, "reopen with a window open does nothing");
+  }
+
+  #[gpui_kit::test]
+  fn closing_the_last_window_follows_the_platform(cx: &mut TestAppContext) {
+    init_app(cx);
+    cx.update(crate::install_last_window_quit);
+    cx.update(open_empty_window);
+    assert_eq!(cx.windows().len(), 1);
+
+    close_last_window(cx);
+    cx.run_until_parked();
+
+    assert!(cx.windows().is_empty());
+    let quit = cx.update(|cx| cx.global::<crate::QuitCommitted>().0);
+    assert_eq!(quit, !cfg!(target_os = "macos"));
+    if !quit {
+      cx.update(on_reopen);
+      assert_eq!(cx.windows().len(), 1, "dock reopen still opens an empty window");
+    }
+  }
+
+  #[gpui_kit::test]
+  fn closing_the_last_window_while_an_open_is_in_flight_does_not_quit(cx: &mut TestAppContext) {
+    init_app(cx);
+    cx.update(crate::install_last_window_quit);
+    cx.update(open_empty_window);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    fs::write(&path, "text").unwrap();
+
+    cx.update(|cx| open_document_window(path, cx));
+    assert_eq!(cx.windows().len(), 1, "the document has not opened yet");
+    close_last_window(cx);
+    assert!(cx.windows().is_empty());
+    assert!(!cx.update(|cx| cx.global::<crate::QuitCommitted>().0));
+
+    cx.run_until_parked();
+
+    assert_eq!(cx.windows().len(), 1, "the in-flight open still produces a window");
+    assert!(!cx.update(|cx| cx.global::<crate::QuitCommitted>().0));
   }
 }

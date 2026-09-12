@@ -88,6 +88,17 @@ pub struct ThemeSpec {
   pub style: ThemeStyle,
 }
 
+/// Catalog identity for one theme, without style data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeMeta {
+  /// Stable catalog id derived from the authored name.
+  pub id: String,
+  /// Authored theme name shown in the picker.
+  pub name: String,
+  /// Appearance targeted by this theme.
+  pub kind: ThemeKind,
+}
+
 #[derive(Debug, Deserialize)]
 struct ThemeFamily {
   name: String,
@@ -101,6 +112,19 @@ struct RawThemeSpec {
   kind: ThemeKind,
   #[serde(default)]
   style: ThemeStyle,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThemeFamilyHeader {
+  name: String,
+  themes: Vec<RawThemeMeta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawThemeMeta {
+  name: String,
+  #[serde(rename = "appearance")]
+  kind: ThemeKind,
 }
 
 /// Parses a Zed theme family and assigns stable ids to its themes.
@@ -129,6 +153,33 @@ pub fn parse_theme_family(json: &str) -> std::result::Result<Vec<ThemeSpec>, Err
           kind: theme.kind,
           style: theme.style,
         }
+      })
+      .collect(),
+  )
+}
+
+/// Parses theme ids, names, and appearances from a family, ignoring style bodies.
+///
+/// Empty families are rejected because they cannot register a theme.
+pub fn parse_theme_family_meta(json: &str) -> std::result::Result<Vec<ThemeMeta>, Error> {
+  let family: ThemeFamilyHeader = serde_json::from_str(json).map_err(|source| Error::Theme {
+    name: "theme family".to_owned(),
+    reason: source.to_string(),
+  })?;
+  if family.themes.is_empty() {
+    return Err(Error::Theme {
+      name: family.name,
+      reason: "declares no themes".to_owned(),
+    });
+  }
+  Ok(
+    family
+      .themes
+      .into_iter()
+      .map(|theme| ThemeMeta {
+        id: slug(&theme.name),
+        name: theme.name,
+        kind: theme.kind,
       })
       .collect(),
   )
@@ -313,6 +364,18 @@ mod tests {
     assert_eq!(themes[0].name, "Test Dark");
     assert_eq!(themes[0].kind, ThemeKind::Dark);
     assert_eq!(themes[1].kind, ThemeKind::Light);
+  }
+
+  #[test]
+  fn family_meta_matches_full_parse_ids() {
+    let full = parse_theme_family(FAMILY).unwrap();
+    let meta = parse_theme_family_meta(FAMILY).unwrap();
+    assert_eq!(meta.len(), full.len());
+    for (item, spec) in meta.iter().zip(&full) {
+      assert_eq!(item.id, spec.id);
+      assert_eq!(item.name, spec.name);
+      assert_eq!(item.kind, spec.kind);
+    }
   }
 
   #[test]

@@ -7,8 +7,9 @@ use std::io::Cursor;
 use image::{AnimationDecoder, ImageDecoder as _, ImageEncoder as _};
 use serde::{Deserialize, Serialize};
 
-use crate::document::{ImageFormat, decode_limits};
+use crate::document::{ImageFormat, decode_limits, probe_image};
 use crate::error::Error;
+use crate::kind::DocumentKind;
 
 /// Quarter-turn rotation plus flips. Flips apply first, then the rotation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,26 +188,33 @@ pub fn decode_still(bytes: &[u8], format: ImageFormat) -> Result<Decoded, Error>
 }
 
 /// Decode every frame, stopping once `max_pixels` have been collected.
-/// Still formats yield one frame.
-pub fn decode_frames(bytes: &[u8], format: ImageFormat, max_pixels: u64) -> Result<Vec<image::Frame>, Error> {
+/// Still formats yield one frame. The bool is the decoder color type's alpha, not a pixel scan.
+pub fn decode_frames(bytes: &[u8], format: ImageFormat, max_pixels: u64) -> Result<(Vec<image::Frame>, bool), Error> {
   match format {
     ImageFormat::Gif => {
-      let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
-      collect_frames(decoder, max_pixels)
+      let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
+      decoder.set_limits(decode_limits()).map_err(|error| pixel_error(&error))?;
+      let has_alpha = decoder.color_type().has_alpha();
+      Ok((collect_frames(decoder, max_pixels)?, has_alpha))
     },
     ImageFormat::WebP => {
-      let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
+      let mut decoder =
+        image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
+      decoder.set_limits(decode_limits()).map_err(|error| pixel_error(&error))?;
+      let has_alpha = decoder.color_type().has_alpha();
       if decoder.has_animation() {
-        collect_frames(decoder, max_pixels)
+        Ok((collect_frames(decoder, max_pixels)?, has_alpha))
       } else {
         still_frame(bytes, format)
       }
     },
     ImageFormat::Png => {
-      let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
+      let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(|error| pixel_error(&error))?;
+      decoder.set_limits(decode_limits()).map_err(|error| pixel_error(&error))?;
+      let has_alpha = decoder.color_type().has_alpha();
       if decoder.is_apng().map_err(|error| pixel_error(&error))? {
         let apng = decoder.apng().map_err(|error| pixel_error(&error))?;
-        collect_frames(apng, max_pixels)
+        Ok((collect_frames(apng, max_pixels)?, has_alpha))
       } else {
         still_frame(bytes, format)
       }
@@ -215,22 +223,27 @@ pub fn decode_frames(bytes: &[u8], format: ImageFormat, max_pixels: u64) -> Resu
   }
 }
 
-/// Rotate and flip one buffer.
+/// Rotate and flip one buffer. Identity returns `image` without copying.
 #[must_use]
-pub fn transformed(image: &image::DynamicImage, transform: Transform) -> image::DynamicImage {
-  let mut out = if transform.flip_h {
-    image.fliph()
-  } else {
-    image.clone()
-  };
+pub fn transformed(image: image::DynamicImage, transform: Transform) -> image::DynamicImage {
+  if transform.is_identity() {
+    return image;
+  }
+  let mut image = image;
+  if transform.flip_h {
+    image::imageops::flip_horizontal_in_place(&mut image);
+  }
   if transform.flip_v {
-    out = out.flipv();
+    image::imageops::flip_vertical_in_place(&mut image);
   }
   match transform.quarter_turns % 4 {
-    1 => out.rotate90(),
-    2 => out.rotate180(),
-    3 => out.rotate270(),
-    _ => out,
+    1 => image.rotate90(),
+    2 => {
+      image::imageops::rotate180_in_place(&mut image);
+      image
+    },
+    3 => image.rotate270(),
+    _ => image,
   }
 }
 
@@ -283,11 +296,12 @@ pub fn to_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Error> {
       });
     },
   };
-  let decoded = decode_still(bytes, format)?;
-  let (width, height) = (decoded.image.width(), decoded.image.height());
   if format == ImageFormat::Png {
+    let (_, width, height) = probe_image(bytes, DocumentKind::Image).map_err(|reason| Error::Format { reason })?;
     return Ok((bytes.to_vec(), width, height));
   }
+  let decoded = decode_still(bytes, format)?;
+  let (width, height) = (decoded.image.width(), decoded.image.height());
   let png = encode(&decoded.image, OutputFormat::Png, Background::Transparent, None)?;
   Ok((png, width, height))
 }
@@ -297,7 +311,7 @@ pub fn encode_in_place(bytes: &[u8], format: ImageFormat, transform: Transform) 
     return Err(unsupported(format));
   }
   if format == ImageFormat::Gif {
-    let frames = decode_frames(bytes, format, u64::MAX)?;
+    let (frames, _) = decode_frames(bytes, format, u64::MAX)?;
     let mut out = Vec::new();
     {
       let mut encoder = image::codecs::gif::GifEncoder::new(&mut out);
@@ -307,7 +321,7 @@ pub fn encode_in_place(bytes: &[u8], format: ImageFormat, transform: Transform) 
       for frame in frames {
         let delay = frame.delay();
         let (left, top) = (frame.left(), frame.top());
-        let buffer = transformed(&image::DynamicImage::ImageRgba8(frame.into_buffer()), transform).into_rgba8();
+        let buffer = transformed(image::DynamicImage::ImageRgba8(frame.into_buffer()), transform).into_rgba8();
         encoder
           .encode_frame(image::Frame::from_parts(buffer, left, top, delay))
           .map_err(|error| pixel_error(&error))?;
@@ -317,7 +331,7 @@ pub fn encode_in_place(bytes: &[u8], format: ImageFormat, transform: Transform) 
   }
 
   let decoded = decode_still(bytes, format)?;
-  let rotated = transformed(&decoded.image, transform);
+  let rotated = transformed(decoded.image, transform);
   if format == ImageFormat::Tga {
     let mut out = Vec::new();
     let buffer = rotated.into_rgba8();
@@ -443,9 +457,9 @@ fn set_icc<E: image::ImageEncoder>(encoder: &mut E, icc: Option<Vec<u8>>) {
 }
 
 /// One frame from a still image.
-fn still_frame(bytes: &[u8], format: ImageFormat) -> Result<Vec<image::Frame>, Error> {
+fn still_frame(bytes: &[u8], format: ImageFormat) -> Result<(Vec<image::Frame>, bool), Error> {
   let decoded = decode_still(bytes, format)?;
-  Ok(vec![image::Frame::new(decoded.image.into_rgba8())])
+  Ok((vec![image::Frame::new(decoded.image.into_rgba8())], decoded.has_alpha))
 }
 
 /// Collect animation frames within a pixel budget.
@@ -495,7 +509,7 @@ mod tests {
 
   use super::{
     Background, Decoded, ExportOptions, OutputFormat, SizeRule, Transform, decode_frames, encode_in_place, export,
-    output_size,
+    output_size, transformed,
   };
   use crate::document::ImageFormat;
 
@@ -548,10 +562,19 @@ mod tests {
     let transparent = png_of(&image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 0])));
 
     let decoded = super::decode_still(&transparent, ImageFormat::Png).unwrap();
-    let frames = decode_frames(&transparent, ImageFormat::Png, 1024 * 1024).unwrap();
+    let (frames, has_alpha) = decode_frames(&transparent, ImageFormat::Png, 1024 * 1024).unwrap();
 
     assert!(decoded.has_alpha);
+    assert!(has_alpha);
     assert_eq!(frames.len(), 1);
+  }
+
+  #[test]
+  fn identity_transform_does_not_copy() {
+    let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 4])));
+    let ptr = image.as_rgba8().unwrap().as_ptr();
+    let out = transformed(image, Transform::IDENTITY);
+    assert_eq!(out.as_rgba8().unwrap().as_ptr(), ptr);
   }
 
   #[test]
@@ -677,7 +700,7 @@ mod tests {
 
     let out = encode_in_place(&bytes, ImageFormat::Gif, Transform::IDENTITY.rotate_cw()).unwrap();
 
-    let frames = decode_frames(&out, ImageFormat::Gif, 64 * 1024 * 1024).unwrap();
+    let (frames, _) = decode_frames(&out, ImageFormat::Gif, 64 * 1024 * 1024).unwrap();
     assert_eq!(frames.len(), 3);
     assert_eq!(frames[0].buffer().dimensions(), (2, 4));
   }

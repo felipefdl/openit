@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ use crate::settings::AppSettings;
 
 #[cfg(test)]
 static RELEASED_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// One 4096² RGBA frame, matching the decode edge cap, so a long document cannot pin every bitmap.
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 const _: () = assert!(MAX_RESOURCE_BYTES == image_decode::MAX_IMAGE_BYTES);
 
@@ -133,6 +136,7 @@ pub struct DocumentImageCache {
   notifications: HashMap<u64, Task<()>>,
   placeholder: Option<Arc<RenderImage>>,
   placeholder_slot: Arc<OnceLock<Arc<RenderImage>>>,
+  ready: ReadyBudget,
 }
 impl DocumentImageCache {
   /// Create a cache for a document base directory.
@@ -149,6 +153,7 @@ impl DocumentImageCache {
       notifications: HashMap::new(),
       placeholder: None,
       placeholder_slot: Arc::new(OnceLock::new()),
+      ready: ReadyBudget::default(),
     })
   }
 
@@ -234,7 +239,11 @@ impl DocumentImageCache {
   ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
     let result = match self.entries.get_mut(&resource_hash) {
       Some(Entry::Loading(task)) => task.clone().now_or_never(),
-      Some(Entry::Ready(image)) => return Some(Ok(image.clone())),
+      Some(Entry::Ready(image)) => {
+        let image = image.clone();
+        self.ready.touch(resource_hash);
+        return Some(Ok(image));
+      },
       Some(Entry::Failed(error)) => return Some(Err(error.clone())),
       Some(Entry::AwaitingPermission(_)) | None => return None,
       Some(Entry::Placeholder(kind)) => {
@@ -256,7 +265,7 @@ impl DocumentImageCache {
           self.placeholder = placeholder;
           self.entries.insert(resource_hash, Entry::Placeholder(PlaceholderKind::Svg));
         } else {
-          self.entries.insert(resource_hash, Entry::Ready(image.clone()));
+          self.insert_ready(resource_hash, image.clone(), cx);
         }
         Some(Ok(image))
       },
@@ -400,7 +409,7 @@ impl DocumentImageCache {
       let Some(resource) = self.resources.get(&resource_hash).cloned() else {
         continue;
       };
-      self.entries.remove(&resource_hash);
+      self.remove_ready(resource_hash, cx);
       self.notifications.remove(&resource_hash);
       let _ = self.load(&resource, window, cx);
     }
@@ -412,6 +421,30 @@ impl DocumentImageCache {
       .entries
       .insert(resource_hash, Entry::Placeholder(PlaceholderKind::Denied(reason)));
     image
+  }
+
+  fn insert_ready(&mut self, resource_hash: u64, image: Arc<RenderImage>, cx: &mut App) {
+    self.ready.remove(resource_hash);
+    let bytes = render_image_bytes(&image);
+    self.entries.insert(resource_hash, Entry::Ready(image));
+    for oldest in self.ready.insert(resource_hash, bytes, MAX_CACHE_BYTES) {
+      if let Some(Entry::Ready(image)) = self.entries.remove(&oldest) {
+        cx.drop_image(image, None);
+        #[cfg(test)]
+        RELEASED_IMAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+      }
+    }
+  }
+
+  fn remove_ready(&mut self, resource_hash: u64, cx: &mut App) {
+    if let Some(Entry::Ready(image)) = self.entries.remove(&resource_hash) {
+      self.ready.remove(resource_hash);
+      cx.drop_image(image, None);
+      #[cfg(test)]
+      RELEASED_IMAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else {
+      self.entries.remove(&resource_hash);
+    }
   }
 
   fn placeholder_image(&mut self) -> Arc<RenderImage> {
@@ -428,6 +461,7 @@ impl DocumentImageCache {
         RELEASED_IMAGE_COUNT.fetch_add(1, Ordering::Relaxed);
       }
     }
+    self.ready = ReadyBudget::default();
     self.resources.clear();
     self.notifications.clear();
     let placeholder = self.placeholder.take().or_else(|| self.placeholder_slot.get().cloned());
@@ -529,6 +563,74 @@ fn io_error(error: std::io::Error) -> ImageCacheError {
 
 fn other_error(message: impl Into<String>) -> ImageCacheError {
   ImageCacheError::Other(Arc::new(gpui_kit::private::anyhow::anyhow!(message.into())))
+}
+
+fn render_image_bytes(image: &RenderImage) -> usize {
+  (0..image.frame_count())
+    .filter_map(|index| image.as_bytes(index).map(<[u8]>::len))
+    .sum()
+}
+
+#[derive(Default)]
+struct ReadyBudget {
+  order: VecDeque<u64>,
+  sizes: HashMap<u64, usize>,
+  total: usize,
+}
+
+impl ReadyBudget {
+  fn insert(&mut self, hash: u64, bytes: usize, budget: usize) -> Vec<u64> {
+    self.remove(hash);
+    self.order.push_back(hash);
+    self.sizes.insert(hash, bytes);
+    self.total = self.total.saturating_add(bytes);
+    self.evict_over(budget)
+  }
+
+  fn touch(&mut self, hash: u64) {
+    if self.sizes.contains_key(&hash) {
+      self.order.retain(|entry| hash != *entry);
+      self.order.push_back(hash);
+    }
+  }
+
+  fn remove(&mut self, hash: u64) {
+    if let Some(bytes) = self.sizes.remove(&hash) {
+      self.total = self.total.saturating_sub(bytes);
+      self.order.retain(|entry| hash != *entry);
+    }
+  }
+
+  fn evict_over(&mut self, budget: usize) -> Vec<u64> {
+    let mut evicted = Vec::new();
+    while self.total > budget && self.order.len() > 1 {
+      let Some(oldest) = self.order.pop_front() else {
+        break;
+      };
+      if let Some(bytes) = self.sizes.remove(&oldest) {
+        self.total = self.total.saturating_sub(bytes);
+        evicted.push(oldest);
+      }
+    }
+    evicted
+  }
+}
+
+#[cfg(test)]
+mod ready_budget_tests {
+  use super::{MAX_CACHE_BYTES, ReadyBudget};
+
+  #[test]
+  fn the_ready_cache_evicts_the_oldest_entry_over_budget() {
+    let mut ready = ReadyBudget::default();
+    let big = MAX_CACHE_BYTES / 2 + 1;
+    let _ = ready.insert(0, big, MAX_CACHE_BYTES);
+    let _ = ready.insert(1, big, MAX_CACHE_BYTES);
+    let _ = ready.insert(2, big, MAX_CACHE_BYTES);
+    assert!(!ready.sizes.contains_key(&0), "the oldest entry is evicted");
+    assert!(ready.sizes.contains_key(&2));
+    assert!(ready.total <= MAX_CACHE_BYTES + big);
+  }
 }
 
 #[cfg(all(test, unix))]

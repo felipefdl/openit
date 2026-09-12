@@ -33,13 +33,13 @@ impl AssetSource for AppAssets {
   }
 }
 
-pub fn theme_files() -> Vec<(String, String)> {
+pub fn theme_files() -> Vec<(String, Cow<'static, [u8]>)> {
   Embedded::iter()
     .filter(|name| name.starts_with("themes/") && name.ends_with(".json"))
     .filter_map(|name| {
       let id = name.trim_start_matches("themes/").trim_end_matches(".json").to_owned();
       let data = Embedded::get(&name)?.data;
-      Some((id, String::from_utf8_lossy(&data).into_owned()))
+      Some((id, data))
     })
     .collect()
 }

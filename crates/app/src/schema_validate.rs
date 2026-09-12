@@ -1,22 +1,16 @@
 //! Map a JSON-family buffer onto schema diagnostics. No GPUI.
 
-use openit_core::schema::{self, CompiledSchema, JsonFamily, SchemaDiagnostic, SchemaDocuments, SyntaxError};
+use openit_core::schema::{CompiledSchema, ParsedJson, SchemaDiagnostic, SyntaxError};
 
-/// Parse `text` and, when `documents` are ready, validate. A compile failure is
-/// not a diagnostic (download and `$ref` failures stay off the editor).
+/// Validate an already-parsed document. A compile failure is not a diagnostic
+/// (download and `$ref` failures stay off the editor).
 pub(crate) fn collect_issues(
-  family: JsonFamily,
-  text: &str,
-  documents: Option<&SchemaDocuments>,
+  parsed: Result<&ParsedJson, &SyntaxError>,
+  compiled: Option<&CompiledSchema>,
 ) -> Vec<SchemaDiagnostic> {
-  match schema::parse(family, text) {
-    Err(SyntaxError { range, message }) => vec![SchemaDiagnostic { range, message }],
-    Ok(parsed) => {
-      let Some(documents) = documents else {
-        return Vec::new();
-      };
-      CompiledSchema::compile(documents).map_or_else(|_| Vec::new(), |compiled| compiled.validate(&parsed))
-    },
+  match parsed {
+    Err(SyntaxError { range, message }) => vec![SchemaDiagnostic { range: *range, message: message.clone() }],
+    Ok(parsed) => compiled.map_or_else(Vec::new, |compiled| compiled.validate(parsed)),
   }
 }
 
@@ -24,7 +18,7 @@ pub(crate) fn collect_issues(
 mod tests {
   use std::collections::BTreeMap;
 
-  use openit_core::schema::{JsonFamily, SchemaDocuments};
+  use openit_core::schema::{CompiledSchema, JsonFamily, SchemaDocuments, parse};
   use serde_json::json;
 
   use super::collect_issues;
@@ -38,9 +32,14 @@ mod tests {
     }
   }
 
+  fn compiled(root: serde_json::Value) -> CompiledSchema {
+    CompiledSchema::compile(&documents(root)).expect("compile")
+  }
+
   #[test]
   fn a_syntax_error_is_an_issue_without_a_schema() {
-    let issues = collect_issues(JsonFamily::Json, "{ // comment }", None);
+    let parsed = parse(JsonFamily::Json, "{ // comment }");
+    let issues = collect_issues(parsed.as_ref(), None);
     assert_eq!(issues.len(), 1);
     assert!(issues[0].range.start < issues[0].range.end);
   }
@@ -53,8 +52,10 @@ mod tests {
       "properties": {},
       "additionalProperties": false
     });
-    let issues = collect_issues(JsonFamily::Json, text, Some(&documents(schema)));
+    let parsed = parse(JsonFamily::Json, text).expect("parse");
+    let compiled = compiled(schema);
     let extra = text.find("\"extra\"").unwrap();
+    let issues = collect_issues(Ok(&parsed), Some(&compiled));
     assert!(
       issues.iter().any(|issue| issue.range.start <= extra && extra < issue.range.end),
       "{issues:?}"
@@ -68,8 +69,10 @@ mod tests {
       "type": "object",
       "properties": { "n": { "type": "number" } }
     });
-    let issues = collect_issues(JsonFamily::Json, text, Some(&documents(schema)));
+    let parsed = parse(JsonFamily::Json, text).expect("parse");
+    let compiled = compiled(schema);
     let value = text.find("\"x\"").unwrap();
+    let issues = collect_issues(Ok(&parsed), Some(&compiled));
     assert!(
       issues.iter().any(|issue| issue.range.start <= value && value < issue.range.end),
       "{issues:?}"
@@ -88,6 +91,23 @@ mod tests {
       root: "https://openit.test/schema.json".to_owned(),
       documents,
     };
-    assert!(collect_issues(JsonFamily::Json, text, Some(&documents)).is_empty());
+    let parsed = parse(JsonFamily::Json, text).expect("parse");
+    let compiled = CompiledSchema::get_or_compile(None, &documents).ok();
+    assert!(collect_issues(Ok(&parsed), compiled.as_ref()).is_empty());
+  }
+
+  #[test]
+  fn get_or_compile_reuses_the_validator_when_the_identity_is_unchanged() {
+    let schema = json!({
+      "type": "object",
+      "properties": { "n": { "type": "number" } }
+    });
+    let documents = documents(schema);
+    let first = CompiledSchema::compile(&documents).expect("compile");
+    let identity = first.identity().clone();
+    let reused = CompiledSchema::get_or_compile(Some(first), &documents).expect("reuse");
+    assert_eq!(reused.identity(), &identity);
+    let parsed = parse(JsonFamily::Json, "{\n  \"n\": 1\n}\n").expect("parse");
+    assert!(collect_issues(Ok(&parsed), Some(&reused)).is_empty());
   }
 }

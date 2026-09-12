@@ -83,7 +83,7 @@ pub fn load_text(path: &Path) -> Result<Loaded, Error> {
       source: io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
     });
   }
-  let disk = Fingerprint::of_file(&file).map_err(|source| Error::Read { path: path_buf.clone(), source })?;
+  let disk = Fingerprint::from_metadata(&metadata);
   let kind = detect(path);
   if !matches!(kind, DocumentKind::Markdown | DocumentKind::Text { .. }) {
     return Err(Error::Unsupported { path: path.to_path_buf() });
