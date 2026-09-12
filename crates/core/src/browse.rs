@@ -193,7 +193,6 @@ mod tests {
   use std::path::{Path, PathBuf};
 
   use super::{Entry, Ranked, list, parse, rank};
-  use crate::error::Error;
   use crate::kind::DocumentKind;
 
   fn display_names(entries: &[Entry]) -> Vec<String> {
@@ -249,6 +248,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn unreadable_directory_returns_an_error() {
+    use crate::error::Error;
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().unwrap();

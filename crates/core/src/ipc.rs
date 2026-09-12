@@ -168,7 +168,7 @@ fn default_socket_name() -> Result<SocketName, Error> {
       path: PathBuf::from(r"\\.\pipe\openit"),
       source: io::Error::new(io::ErrorKind::NotFound, error),
     })?;
-    return Ok(SocketName(PathBuf::from(format!(r"\\.\pipe\openit-{user}"))));
+    Ok(SocketName(PathBuf::from(format!(r"\\.\pipe\openit-{user}"))))
   }
   #[cfg(not(windows))]
   {
