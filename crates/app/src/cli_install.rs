@@ -1,4 +1,11 @@
 //! Install and remove the `openit` and `oi` command links.
+#![cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    dead_code,
+    reason = "command-line tool links are installed from the macOS window"
+  )
+)]
 
 use std::fmt;
 use std::fs;
@@ -105,10 +112,15 @@ pub(crate) fn link_target() -> Result<PathBuf, InstallError> {
 pub(crate) fn apply_in(dir: &Path, target: &Path, planned: &Plan) -> Result<(), InstallError> {
   if dir_is_writable(dir) {
     apply_direct(dir, target, planned)
-  } else if cfg!(target_os = "macos") {
-    apply_elevated(dir, target, planned)
   } else {
-    Err(InstallError::Message(format!("{} is not writable", dir.display())))
+    #[cfg(target_os = "macos")]
+    {
+      apply_elevated(dir, target, planned)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      Err(InstallError::Message(format!("{} is not writable", dir.display())))
+    }
   }
 }
 
@@ -190,7 +202,7 @@ fn remove_link(link: &Path) -> Result<(), InstallError> {
   Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn apply_elevated(dir: &Path, target: &Path, planned: &Plan) -> Result<(), InstallError> {
   let mut cmds = vec![format!("mkdir -p {}", sh_quote(&dir.to_string_lossy()))];
   for name in &planned.remove {
@@ -208,10 +220,12 @@ fn apply_elevated(dir: &Path, target: &Path, planned: &Plan) -> Result<(), Insta
   run_osascript(&cmds.join(" && "))
 }
 
+#[cfg(target_os = "macos")]
 fn sh_quote(value: &str) -> String {
   format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(target_os = "macos")]
 fn cancelled(stderr: &str) -> bool {
   stderr.contains("User canceled") || stderr.contains("User cancelled") || stderr.contains("-128")
 }
@@ -232,13 +246,6 @@ fn run_osascript(shell_cmd: &str) -> Result<(), InstallError> {
     return Err(InstallError::Cancelled);
   }
   Err(InstallError::Message(format!("could not update the commands: {stderr}")))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn run_osascript(_shell_cmd: &str) -> Result<(), InstallError> {
-  Err(InstallError::Message(
-    "administrator elevation is only available on macOS".into(),
-  ))
 }
 
 /// Open the macOS install window.
@@ -494,9 +501,11 @@ mod tests {
   use std::fs;
   use std::path::PathBuf;
 
+  #[cfg(unix)]
+  use super::apply_in;
   use super::{
-    LinkStatus, Plan, apply_in, initial_wanted, plan, resolve_link_target, status_in, windows_path_adding,
-    windows_path_removing, windows_shim,
+    LinkStatus, Plan, initial_wanted, plan, resolve_link_target, status_in, windows_path_adding, windows_path_removing,
+    windows_shim,
   };
 
   fn status(openit: bool, oi: bool) -> LinkStatus {
@@ -539,7 +548,18 @@ mod tests {
   }
 
   #[test]
-  fn link_target_prefers_appimage_and_resolves_symlinks() {
+  fn link_target_prefers_appimage_over_the_running_binary() {
+    let exe = PathBuf::from("OpenIt");
+    assert_eq!(
+      resolve_link_target(&exe, Some("/tmp/OpenIt.AppImage")),
+      PathBuf::from("/tmp/OpenIt.AppImage")
+    );
+    assert_eq!(resolve_link_target(&exe, Some("")), exe);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn link_target_resolves_symlinks_when_appimage_is_unset() {
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().join("OpenIt");
     fs::write(&real, []).unwrap();
@@ -547,11 +567,6 @@ mod tests {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let resolved = fs::canonicalize(&real).unwrap();
     assert_eq!(resolve_link_target(&link, None), resolved);
-    assert_eq!(
-      resolve_link_target(&link, Some("/tmp/OpenIt.AppImage")),
-      PathBuf::from("/tmp/OpenIt.AppImage")
-    );
-    assert_eq!(resolve_link_target(&link, Some("")), resolved);
   }
 
   #[test]
