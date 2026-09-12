@@ -17,11 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - macos-latest
+          - macos-14
           - ubuntu-22.04
           - windows-latest
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Enable long paths for dependency checkouts
         if: runner.os == 'Windows'
@@ -43,3 +43,8 @@ jobs:
         run: just check
       - name: Release build
         run: cargo build --release -p openit
+      - name: Stop leftover processes
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          pkill -9 -f '/Users/runner/work/openit/openit/target/' || true
