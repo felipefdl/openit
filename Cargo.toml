@@ -5,7 +5,7 @@ resolver = "3"
 members = ["crates/core", "crates/app"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ repository = "https://github.com/felipefdl/openit"
 description = "Native single-file viewer and editor"
 
 [workspace.dependencies]
-openit-core = { path = "crates/core", version = "0.0.0" }
+openit-core = { path = "crates/core", version = "0.1.0" }
 url = "2"
 psl = "2"
 percent-encoding = "2"
