@@ -1320,6 +1320,13 @@ pub(crate) mod tests {
     (dir, store)
   }
 
+  fn select_all(cx: &mut VisualTestContext) {
+    #[cfg(target_os = "macos")]
+    cx.simulate_keystrokes("cmd-a");
+    #[cfg(not(target_os = "macos"))]
+    cx.simulate_keystrokes("ctrl-a");
+  }
+
   fn png(width: u32, height: u32) -> Vec<u8> {
     let image = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
     let mut output = std::io::Cursor::new(Vec::new());
@@ -2068,7 +2075,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("new text");
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.is_dirty()));
@@ -2091,7 +2098,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("one");
     cx.run_until_parked();
 
@@ -2119,7 +2126,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("new");
     cx.run_until_parked();
     fs::remove_dir_all(dir.path()).unwrap();
@@ -2148,7 +2155,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("new");
     cx.run_until_parked();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
@@ -2176,7 +2183,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("new");
     cx.run_until_parked();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
@@ -2420,7 +2427,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
 
     fs::write(&path, "theirs").unwrap();
@@ -2444,7 +2451,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     fs::write(&path, "theirs").unwrap();
     cx.update(|_, cx| view.update(cx, DocumentView::simulate_disk_change));
@@ -2507,7 +2514,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     cx.update(|window, cx| {
       view.update(cx, |view, cx| {
@@ -2554,7 +2561,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     cx.update(|window, cx| {
       view.update(cx, |view, cx| {
@@ -2872,7 +2879,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (_view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     cx.executor().advance_clock(CHECKPOINT_DELAY);
     cx.run_until_parked();
@@ -2926,7 +2933,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
 
     fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
@@ -3184,7 +3191,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("one");
     cx.update(|window, cx| view.update(cx, |view, cx| view.save(&crate::actions::Save, window, cx)));
     cx.simulate_input("two");
@@ -3206,7 +3213,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     fs::write(&path, "theirs").unwrap();
     cx.update(|_, cx| view.update(cx, DocumentView::simulate_disk_change));
@@ -3285,7 +3292,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("saved");
     cx.update(|window, cx| view.update(cx, |view, cx| view.save(&crate::actions::Save, window, cx)));
     assert!(!cx.simulate_close());
@@ -3310,7 +3317,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     fs::write(&path, "foreign").unwrap();
     cx.update(|window, cx| view.update(cx, |view, cx| view.save(&crate::actions::Save, window, cx)));
@@ -3335,7 +3342,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
     cx.executor().advance_clock(AUTOSAVE_DELAY);
     cx.run_until_parked();
@@ -3488,7 +3495,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
 
     cx.update(|window, cx| view.update(cx, |view, cx| view.save_then_close(window, cx)));
@@ -3558,7 +3565,7 @@ pub(crate) mod tests {
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
-    cx.simulate_keystrokes("cmd-a");
+    select_all(cx);
     cx.simulate_input("mine");
 
     fs::write(&path, "foreign").unwrap();
