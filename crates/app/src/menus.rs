@@ -5,8 +5,8 @@ use openit_core::settings::{MarkdownPreviewWidth, Settings, ThemeMode};
 use crate::actions::{
   ActualSize, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find, FlipHorizontal,
   FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages, Quit, RotateLeft,
-  RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode, ToggleAlwaysShowStatusBar,
-  ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
+  RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode, ToggleAlwaysShowStatusBar, ToggleMode,
+  UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 

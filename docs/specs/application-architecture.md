@@ -242,7 +242,7 @@ JSON, JSONC, and JSON5 documents complete from a JSON Schema and show quiet sche
 
 ## Theme
 
-One theme is in effect for the whole application: one theme for every window, applied from the OS appearance the application reports. It supplies every color: window chrome, editor, syntax highlighting, Markdown preview, status bar, prompts, and the permission bar. Themes are Zed-format theme families: one JSON file holding one or more themes, each marked `dark` or `light`.
+One theme is in effect for the whole application: one theme for every window, applied from the OS appearance the application reports. It supplies every color: window chrome, editor, syntax highlighting, Markdown preview, status bar, prompts, and the permission bar. Two application-wide families persist across color-theme switches: UI Font for chrome and Code Font for monospace. Themes are Zed-format theme families: one JSON file holding one or more themes, each marked `dark` or `light`.
 
 ### Sources
 
@@ -261,6 +261,8 @@ One theme is in effect for the whole application: one theme for every window, ap
 View > Appearance holds System, Light, Dark (radio). Choosing one writes `mode` to the settings file.
 
 View > Color Theme..., Cmd/Ctrl+K Cmd/Ctrl+T, and the palette button in the title bar open the theme picker: a command palette listing the dark and light themes (the OS kind first) with live preview while moving; Enter writes the pick as the `light` or `dark` id and, when the pick is of the other kind than the one shown, pins `mode` to that kind; Escape restores the configured theme.
+
+View > Font is the submenu for UI Font and Code Font. View > Font > UI Font... and Cmd/Ctrl+K Cmd/Ctrl+U open the UI Font picker; View > Font > Code Font... and Cmd/Ctrl+K Cmd/Ctrl+C open the Code Font picker. Each picker lists the fonts installed on the machine with live preview while moving; Enter writes that family; Escape restores the saved pair.
 
 ## Resource permissions
 
@@ -328,7 +330,7 @@ Native menus: `OpenIt` (Install Command Line Tools... (macOS), Quit), `File` (Ne
 
 ### Settings
 
-One TOML file in the platform config directory: autosave, `always_show_status_bar` (default `false`), `allow_remote` (default `false`), `allowed_domains` (default `github.com`, `githubusercontent.com`, `schemastore.org`), `[theme]`: `mode` (`system` | `light` | `dark`), `light`, `dark` theme ids, manual schema choices, and the session window list used for recovery. Changes apply to open windows without restart.
+One TOML file in the platform config directory: autosave, `always_show_status_bar` (default `false`), `allow_remote` (default `false`), `allowed_domains` (default `github.com`, `githubusercontent.com`, `schemastore.org`), `[theme]`: `mode` (`system` | `light` | `dark`), `light`, `dark` theme ids, `[font]`: `ui` (UI Font) and `code` (Code Font), manual schema choices, and the session window list used for recovery. Changes apply to open windows without restart. View > Font > UI Font... and Cmd/Ctrl+K Cmd/Ctrl+U write `ui`; View > Font > Code Font... and Cmd/Ctrl+K Cmd/Ctrl+C write `code`.
 
 Markdown preferences use `markdown_preview_width` (`readable` | `wide` | `full_width`, default `readable`) and `markdown_mode` (`preview` | `edit`, default `preview`). Width changes apply to open previews; the mode preference only controls newly opened or restored Markdown windows. Opening other text formats does not change the remembered Markdown mode.
 
@@ -402,3 +404,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-09-11: Open requests: the app binary is the `openit` command, one running instance owns every request, and an empty launch shows a window. Details in [Open requests](open-requests.md).
 - 2026-09-11: Configuration validation points at [Schema validation](schema-validation.md): quiet status name, schema completions, and fetch failure as a log line only.
 - 2026-09-12: Closing the last window quits on Linux and Windows through the existing quit path, unless an open is still in flight. macOS stays resident with no windows so Dock reopen can show an empty one.
+- 2026-09-12: Font selector: UI Font and Code Font persist across color-theme switches; View > Font, Cmd/Ctrl+K Cmd/Ctrl+U, and Cmd/Ctrl+K Cmd/Ctrl+C open the pickers. Details in [Font selector](font-selector.md).
