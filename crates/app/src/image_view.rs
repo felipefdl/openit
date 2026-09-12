@@ -25,10 +25,11 @@ use openit_core::watch::{FileWatch, Fingerprint};
 use gpui_kit::component::input::{Redo, Undo};
 
 use crate::actions::{
-  ActualSize, CloseWindow, ColorTheme, CycleBackground, Export, FlipHorizontal, FlipVertical, GoToFile, RotateLeft,
-  RotateRight, Save, SetImageBackground, ZoomIn, ZoomOut, ZoomToFit,
+  ActualSize, CloseWindow, CodeFont, ColorTheme, CycleBackground, Export, FlipHorizontal, FlipVertical, GoToFile,
+  RotateLeft, RotateRight, Save, SetImageBackground, UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::export_dialog::{ExportDialog, ExportEvent};
+use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::image_decode::DocumentImage;
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
 use crate::session::{CHECKPOINT_DELAY, PendingCleanups, Recovery};
@@ -185,6 +186,7 @@ pub struct ImageView {
   background_chosen: bool,
   viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
   theme_picker: Option<gpui_kit::Entity<ThemePicker>>,
+  font_picker: Option<gpui_kit::Entity<FontPicker>>,
   nearby_picker: Option<gpui_kit::Entity<NearbyPicker>>,
   export_dialog: Option<gpui_kit::Entity<ExportDialog>>,
   focus: gpui_kit::FocusHandle,
@@ -357,6 +359,7 @@ impl ImageView {
       background_chosen: false,
       viewport: Rc::default(),
       theme_picker: None,
+      font_picker: None,
       nearby_picker: None,
       export_dialog: None,
       focus: cx.focus_handle(),
@@ -1312,6 +1315,9 @@ impl ImageView {
   }
 
   fn open_theme_picker(&mut self, _: &ColorTheme, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(picker) = self.font_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
     let picker = cx.new(|cx| ThemePicker::new(window, cx));
     cx.subscribe_in(&picker, window, |view, _, event: &ThemePickerEvent, _window, cx| {
       if matches!(event, ThemePickerEvent::Close) {
@@ -1321,6 +1327,37 @@ impl ImageView {
     })
     .detach();
     self.theme_picker = Some(picker);
+    cx.notify();
+  }
+
+  fn open_ui_font_picker(&mut self, _: &UiFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Ui, window, cx);
+  }
+
+  fn open_code_font_picker(&mut self, _: &CodeFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Code, window, cx);
+  }
+
+  fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(picker) = self.theme_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    if let Some(picker) = &self.font_picker {
+      if picker.read(cx).slot() == slot {
+        picker.update(cx, |picker, cx| picker.focus(window, cx));
+        return;
+      }
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    let picker = cx.new(|cx| FontPicker::new(slot, window, cx));
+    cx.subscribe_in(&picker, window, |view, _, event: &FontPickerEvent, _window, cx| {
+      if matches!(event, FontPickerEvent::Close) {
+        view.font_picker = None;
+        cx.notify();
+      }
+    })
+    .detach();
+    self.font_picker = Some(picker);
     cx.notify();
   }
 
@@ -1683,6 +1720,8 @@ impl Render for ImageView {
       .on_action(cx.listener(Self::cycle_background))
       .on_action(cx.listener(Self::choose_background))
       .on_action(cx.listener(Self::open_theme_picker))
+      .on_action(cx.listener(Self::open_ui_font_picker))
+      .on_action(cx.listener(Self::open_code_font_picker))
       .on_action(cx.listener(Self::open_nearby_picker))
       .on_action(cx.listener(Self::rotate_left))
       .on_action(cx.listener(Self::rotate_right))
@@ -1705,6 +1744,7 @@ impl Render for ImageView {
       .child(self.render_body(cx))
       .child(self.render_status_bar(cx))
       .children(self.theme_picker.clone().map(IntoElement::into_any_element))
+      .children(self.font_picker.clone().map(IntoElement::into_any_element))
       .children(self.nearby_picker.clone().map(IntoElement::into_any_element))
       .children(self.export_dialog.clone().map(IntoElement::into_any_element))
   }

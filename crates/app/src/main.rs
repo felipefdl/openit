@@ -10,6 +10,7 @@ mod drop;
 mod empty_view;
 mod export_dialog;
 mod fetch;
+mod font_picker;
 mod handoff;
 mod image_cache;
 mod image_decode;

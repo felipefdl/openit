@@ -1,5 +1,6 @@
-use crate::actions::{CloseWindow, ColorTheme, GoToFile, Save, ToggleMode};
+use crate::actions::{CloseWindow, CodeFont, ColorTheme, GoToFile, Save, ToggleMode, UiFont};
 use crate::drop::{apply_external_paths, external_paths_ring};
+use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::image_cache::{DocumentImageCache, PermissionAnswer, PermissionRequests};
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
 use crate::schema_cache::DocumentSchemaCache;
@@ -79,6 +80,7 @@ fn schema_pick_from_settings(path: &Path, cx: &App) -> Option<String> {
 /// The dialog floating over the document, at most one at a time.
 enum Overlay {
   Theme(Entity<ThemePicker>),
+  Font(Entity<FontPicker>),
   Language(Entity<LanguagePicker>),
   Schema(Entity<SchemaPicker>),
   GoToLine(Entity<GoToLine>),
@@ -88,6 +90,7 @@ impl Overlay {
   fn element(&self) -> AnyElement {
     match self {
       Self::Theme(view) => view.clone().into_any_element(),
+      Self::Font(view) => view.clone().into_any_element(),
       Self::Language(view) => view.clone().into_any_element(),
       Self::Schema(view) => view.clone().into_any_element(),
       Self::GoToLine(view) => view.clone().into_any_element(),
@@ -627,6 +630,33 @@ impl DocumentView {
       this.close_overlay(window, cx);
     }));
     self.overlay = Some(Overlay::Theme(picker));
+    cx.notify();
+  }
+  /// Open the UI font picker, or refocus it when already open.
+  pub fn open_ui_font_picker(&mut self, _: &UiFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Ui, window, cx);
+  }
+  /// Open the code font picker, or refocus it when already open.
+  pub fn open_code_font_picker(&mut self, _: &CodeFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Code, window, cx);
+  }
+  fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(Overlay::Font(picker)) = &self.overlay {
+      if picker.read(cx).slot() == slot {
+        picker.update(cx, |picker, cx| picker.focus(window, cx));
+        return;
+      }
+    }
+    match &self.overlay {
+      Some(Overlay::Theme(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      Some(Overlay::Font(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      _ => {},
+    }
+    let picker = cx.new(|cx| FontPicker::new(slot, window, cx));
+    self.overlay_subscription = Some(cx.subscribe_in(&picker, window, |this, _, _: &FontPickerEvent, window, cx| {
+      this.close_overlay(window, cx);
+    }));
+    self.overlay = Some(Overlay::Font(picker));
     cx.notify();
   }
   /// Open the nearby-files picker, or refocus it when already open.
@@ -1289,6 +1319,8 @@ impl Render for DocumentView {
       .on_action(cx.listener(Self::save))
       .on_action(cx.listener(Self::close))
       .on_action(cx.listener(Self::open_theme_picker))
+      .on_action(cx.listener(Self::open_ui_font_picker))
+      .on_action(cx.listener(Self::open_code_font_picker))
       .on_action(cx.listener(Self::open_nearby_picker))
       .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| apply_external_paths(paths, cx)))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
@@ -1799,6 +1831,30 @@ pub(crate) mod tests {
     cx.simulate_keystrokes("cmd-k cmd-t");
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| matches!(view.overlay, Some(super::Overlay::Theme(_)))));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.overlay.is_none()));
+  }
+
+  #[gpui_kit::test]
+  fn ui_font_opener_opens_the_font_picker_and_escape_closes_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.md");
+    fs::write(&path, "# Hi\n").unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+
+    cx.update(|window, cx| {
+      view.update(cx, |view, cx| {
+        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx)
+      });
+    });
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| matches!(view.overlay, Some(super::Overlay::Font(_)))));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();

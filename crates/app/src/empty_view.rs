@@ -8,8 +8,9 @@ use gpui_kit::{
   ParentElement as _, Render, Subscription, Window, div, px, svg,
 };
 
-use crate::actions::{CloseWindow, ColorTheme, OpenFile};
+use crate::actions::{CloseWindow, CodeFont, ColorTheme, OpenFile, UiFont};
 use crate::drop::{apply_external_paths, external_paths_ring};
+use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::theme::{ActivePalette, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 
@@ -19,6 +20,8 @@ pub struct EmptyView {
   drop_hover: bool,
   theme_picker: Option<Entity<ThemePicker>>,
   theme_picker_subscription: Option<Subscription>,
+  font_picker: Option<Entity<FontPicker>>,
+  font_picker_subscription: Option<Subscription>,
   #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
   appearance_observation: Option<Subscription>,
 }
@@ -33,11 +36,14 @@ impl EmptyView {
       drop_hover: false,
       theme_picker: None,
       theme_picker_subscription: None,
+      font_picker: None,
+      font_picker_subscription: None,
       appearance_observation: Some(observe_appearance(window)),
     }
   }
 
   fn open_theme_picker(&mut self, _: &ColorTheme, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_font_picker(window, cx);
     if let Some(picker) = &self.theme_picker {
       picker.update(cx, |picker, cx| picker.focus(window, cx));
       return;
@@ -56,6 +62,46 @@ impl EmptyView {
     self.theme_picker_subscription = None;
     window.focus(&self.focus, cx);
     cx.notify();
+  }
+
+  fn open_ui_font_picker(&mut self, _: &UiFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Ui, window, cx);
+  }
+
+  fn open_code_font_picker(&mut self, _: &CodeFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Code, window, cx);
+  }
+
+  fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    self.close_theme_picker(window, cx);
+    if let Some(picker) = &self.font_picker {
+      if picker.read(cx).slot() == slot {
+        picker.update(cx, |picker, cx| picker.focus(window, cx));
+        return;
+      }
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    let picker = cx.new(|cx| FontPicker::new(slot, window, cx));
+    self.font_picker_subscription =
+      Some(cx.subscribe_in(&picker, window, |this, _, _: &FontPickerEvent, window, cx| {
+        this.close_font_picker(window, cx);
+      }));
+    self.font_picker = Some(picker);
+    cx.notify();
+  }
+
+  fn close_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.font_picker = None;
+    self.font_picker_subscription = None;
+    window.focus(&self.focus, cx);
+    cx.notify();
+  }
+
+  fn dismiss_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(picker) = self.font_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    self.font_picker_subscription = None;
   }
 
   #[allow(clippy::unused_self, reason = "CloseWindow listener signature")]
@@ -95,6 +141,8 @@ impl Render for EmptyView {
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::close))
       .on_action(cx.listener(Self::open_theme_picker))
+      .on_action(cx.listener(Self::open_ui_font_picker))
+      .on_action(cx.listener(Self::open_code_font_picker))
       .on_drag_move(cx.listener(Self::on_external_drag))
       .on_drop(cx.listener(Self::on_external_drop))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
@@ -140,6 +188,7 @@ impl Render for EmptyView {
           .child(div().text_size(px(12.)).text_color(hint).child("or drag and drop a file")),
       )
       .children(self.theme_picker.clone().map(IntoElement::into_any_element))
+      .children(self.font_picker.clone().map(IntoElement::into_any_element))
   }
 }
 
@@ -198,6 +247,23 @@ mod tests {
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.theme_picker.is_none()));
+  }
+
+  #[gpui_kit::test]
+  fn ui_font_opener_opens_and_escape_closes_it(cx: &mut TestAppContext) {
+    init_app(cx);
+    let (view, cx) = cx.add_window_view(EmptyView::new);
+    cx.update(|window, cx| {
+      view.update(cx, |view, cx| {
+        view.open_font_picker(crate::font_picker::FontSlot::Ui, window, cx)
+      });
+    });
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.font_picker.is_some()));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.font_picker.is_none()));
   }
 
   #[gpui_kit::test]

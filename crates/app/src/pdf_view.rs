@@ -26,10 +26,12 @@ use openit_core::save::save_bytes;
 use openit_core::watch::{FileWatch, Fingerprint};
 
 use crate::actions::{
-  ActualSize, CloseWindow, ColorTheme, ConvertToMarkdown, Copy, Find, FirstPage, GoToFile, GoToPage, LastPage,
-  NextMatch, PageDown, PageUp, PdfPages, PreviousMatch, SelectAll, ToggleMode, ZoomIn, ZoomOut, ZoomToFit,
+  ActualSize, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, Copy, Find, FirstPage, GoToFile, GoToPage,
+  LastPage, NextMatch, PageDown, PageUp, PdfPages, PreviousMatch, SelectAll, ToggleMode, UiFont, ZoomIn, ZoomOut,
+  ZoomToFit,
 };
 use crate::document_view::DocumentView;
+use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::image_decode;
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
 use crate::pdf_find::{FindBar, FindBarEvent};
@@ -160,6 +162,8 @@ enum Prompt {
   GoToPage(Entity<GoToPagePrompt>),
   /// The theme picker.
   Theme(Entity<ThemePicker>),
+  /// The font picker.
+  Font(Entity<FontPicker>),
   /// The nearby-files picker.
   Nearby(Entity<NearbyPicker>),
 }
@@ -170,6 +174,7 @@ impl Prompt {
       Self::Password(view) => view.clone().into_any_element(),
       Self::GoToPage(view) => view.clone().into_any_element(),
       Self::Theme(view) => view.clone().into_any_element(),
+      Self::Font(view) => view.clone().into_any_element(),
       Self::Nearby(view) => view.clone().into_any_element(),
     }
   }
@@ -459,6 +464,9 @@ impl PdfView {
     if let Some(Prompt::Theme(_)) = &self.prompt {
       return;
     }
+    if let Some(Prompt::Font(picker)) = &self.prompt {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
     let picker = cx.new(|cx| ThemePicker::new(window, cx));
     self.prompt_subscription =
       Some(
@@ -469,6 +477,37 @@ impl PdfView {
         }),
       );
     self.prompt = Some(Prompt::Theme(picker));
+    cx.notify();
+  }
+
+  fn open_ui_font_picker(&mut self, _: &UiFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Ui, window, cx);
+  }
+
+  fn open_code_font_picker(&mut self, _: &CodeFont, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_font_picker(FontSlot::Code, window, cx);
+  }
+
+  fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(Prompt::Font(picker)) = &self.prompt {
+      if picker.read(cx).slot() == slot {
+        picker.update(cx, |picker, cx| picker.focus(window, cx));
+        return;
+      }
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    } else if let Some(Prompt::Theme(picker)) = &self.prompt {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    let picker = cx.new(|cx| FontPicker::new(slot, window, cx));
+    self.prompt_subscription =
+      Some(
+        cx.subscribe_in(&picker, window, move |view, _, event: &FontPickerEvent, window, cx| {
+          if matches!(event, FontPickerEvent::Close) {
+            view.close_prompt(window, cx);
+          }
+        }),
+      );
+    self.prompt = Some(Prompt::Font(picker));
     cx.notify();
   }
 
@@ -1669,6 +1708,8 @@ impl Render for PdfView {
       .on_action(cx.listener(Self::show_markdown))
       .on_action(cx.listener(Self::show_pdf))
       .on_action(cx.listener(Self::open_theme_picker))
+      .on_action(cx.listener(Self::open_ui_font_picker))
+      .on_action(cx.listener(Self::open_code_font_picker))
       .on_action(cx.listener(Self::open_nearby_picker))
       .on_action(cx.listener(Self::close))
       .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| apply_external_paths(paths, cx)))

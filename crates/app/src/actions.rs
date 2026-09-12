@@ -35,6 +35,10 @@ actions!(
     ToggleMode,
     /// Open the color theme picker.
     ColorTheme,
+    /// Open the UI font picker.
+    UiFont,
+    /// Open the code font picker.
+    CodeFont,
     /// Pin the status bar visible, or let preview hide it again.
     ToggleAlwaysShowStatusBar,
     /// Show the file picker and open the chosen files, one window each.
