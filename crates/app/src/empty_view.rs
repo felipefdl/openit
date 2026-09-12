@@ -203,7 +203,7 @@ mod tests {
 
   use openit_core::settings::Settings;
 
-  use crate::actions::{ColorTheme, OpenFile};
+  use crate::actions::{CodeFont, ColorTheme, OpenFile, UiFont};
 
   use super::EmptyView;
 
@@ -247,6 +247,46 @@ mod tests {
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.theme_picker.is_none()));
+  }
+
+  #[gpui_kit::test]
+  fn ui_font_chord_opens_and_escape_closes_it(cx: &mut TestAppContext) {
+    init_app(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-k cmd-u", UiFont, None)]));
+    let (view, cx) = cx.add_window_view(EmptyView::new);
+
+    cx.simulate_keystrokes("cmd-k cmd-u");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, cx| {
+      view
+        .font_picker
+        .as_ref()
+        .is_some_and(|picker| picker.read(cx).slot() == crate::font_picker::FontSlot::Ui)
+    }));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.font_picker.is_none()));
+  }
+
+  #[gpui_kit::test]
+  fn code_font_chord_opens_and_escape_closes_it(cx: &mut TestAppContext) {
+    init_app(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-k cmd-c", CodeFont, None)]));
+    let (view, cx) = cx.add_window_view(EmptyView::new);
+
+    cx.simulate_keystrokes("cmd-k cmd-c");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, cx| {
+      view
+        .font_picker
+        .as_ref()
+        .is_some_and(|picker| picker.read(cx).slot() == crate::font_picker::FontSlot::Code)
+    }));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.font_picker.is_none()));
   }
 
   #[gpui_kit::test]

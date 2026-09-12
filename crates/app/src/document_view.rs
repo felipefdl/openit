@@ -1838,6 +1838,52 @@ pub(crate) mod tests {
   }
 
   #[gpui_kit::test]
+  fn ui_font_chord_opens_from_a_focused_editor(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-k cmd-u", crate::actions::UiFont, None)]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    fs::write(&path, "hello\n").unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+
+    cx.simulate_keystrokes("cmd-k cmd-u");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, cx| match &view.overlay {
+      Some(super::Overlay::Font(picker)) => picker.read(cx).slot() == crate::font_picker::FontSlot::Ui,
+      _ => false,
+    }));
+    view.read_with(cx, |view, cx| {
+      assert_eq!(view.snapshot(cx).unwrap().text.to_string(), "hello\n");
+    });
+  }
+
+  #[gpui_kit::test]
+  fn code_font_chord_opens_from_a_focused_editor(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-k cmd-c", crate::actions::CodeFont, None)]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    fs::write(&path, "hello\n").unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+
+    cx.simulate_keystrokes("cmd-k cmd-c");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, cx| match &view.overlay {
+      Some(super::Overlay::Font(picker)) => picker.read(cx).slot() == crate::font_picker::FontSlot::Code,
+      _ => false,
+    }));
+    view.read_with(cx, |view, cx| {
+      assert_eq!(view.snapshot(cx).unwrap().text.to_string(), "hello\n");
+    });
+  }
+
+  #[gpui_kit::test]
   fn ui_font_opener_opens_the_font_picker_and_escape_closes_it(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_dir, _store) = install_globals(cx);

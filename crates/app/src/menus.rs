@@ -3,10 +3,10 @@ use gpui_kit::{App, Menu, MenuItem, OsAction};
 use openit_core::settings::{MarkdownPreviewWidth, Settings, ThemeMode};
 
 use crate::actions::{
-  ActualSize, CloseWindow, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find, FlipHorizontal, FlipVertical,
-  GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages, Quit, RotateLeft, RotateRight,
-  Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode, ToggleAlwaysShowStatusBar, ToggleMode, ZoomIn,
-  ZoomOut, ZoomToFit,
+  ActualSize, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find, FlipHorizontal,
+  FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages, Quit, RotateLeft,
+  RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode, ToggleAlwaysShowStatusBar,
+  ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 
@@ -25,6 +25,10 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
     MenuItem::action("System", SetThemeMode(ThemeMode::System)).checked(mode == ThemeMode::System),
     MenuItem::action("Light", SetThemeMode(ThemeMode::Light)).checked(mode == ThemeMode::Light),
     MenuItem::action("Dark", SetThemeMode(ThemeMode::Dark)).checked(mode == ThemeMode::Dark),
+  ]);
+  let font = Menu::new("Font").items([
+    MenuItem::action("UI Font...", UiFont),
+    MenuItem::action("Code Font...", CodeFont),
   ]);
   let image_background = Menu::new("Image Background").items([
     MenuItem::action("Theme", SetImageBackground { background: ImageBackground::Theme }),
@@ -83,6 +87,7 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
       MenuItem::separator(),
       MenuItem::submenu(appearance),
       MenuItem::action("Color Theme...", ColorTheme),
+      MenuItem::submenu(font),
     ]),
     Menu::new("Tools").items([
       MenuItem::action("Rotate Left", RotateLeft),
@@ -103,6 +108,27 @@ pub fn install(cx: &App) {
 mod tests {
   use gpui_kit::MenuItem;
   use openit_core::settings::Settings;
+
+  #[test]
+  fn view_menu_lists_font_submenu() {
+    let items = super::build(&Settings::default())
+      .into_iter()
+      .filter(|menu| menu.name == "View")
+      .flat_map(|menu| menu.items)
+      .find_map(|item| match item {
+        MenuItem::Submenu(menu) if menu.name == "Font" => Some(menu.items),
+        _ => None,
+      })
+      .expect("the View menu offers Font");
+    let names: Vec<_> = items
+      .iter()
+      .filter_map(|item| match item {
+        MenuItem::Action { name, .. } => Some(name.as_str()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(names, ["UI Font...", "Code Font..."]);
+  }
 
   #[test]
   fn file_menu_lists_go_to_file() {
