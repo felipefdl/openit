@@ -102,3 +102,16 @@ Stop and report: font size, ligatures, loading a font file, per-window fonts, PD
 |---|---|---|---|
 | 2026-09-12 | - | Created | |
 | 2026-09-12 | 1 | Dispatched | |
+| 2026-09-12 | 2 | Dispatched | |
+| 2026-09-12 | 3 | Dispatched | |
+| 2026-09-12 | 4 | Dispatched | |
+| 2026-09-12 | 5 | Dispatched | |
+| 2026-09-12 | 1 | Latitude | FontSettings in settings.rs; Option ui/code omit empty [font] on save. Tests in settings.rs::tests. |
+| 2026-09-12 | 2 | Latitude | Fonts applied on Theme after apply_config. Tests use Helvetica/.ZedMono. |
+| 2026-09-12 | 3 | Latitude | FontPicker by FontSlot, 80ms debounce, names cached at open, Escape restores the pair from open. Actions wired on Color Theme hosts. |
+| 2026-09-12 | 5 | Latitude | View > Font named as the submenu. Clippy leftovers from 1-4 fixed on this branch. |
+| 2026-09-12 | 1 | Shipped | `main` @ 67b774f |
+| 2026-09-12 | 2 | Shipped | `main` @ 67b774f |
+| 2026-09-12 | 3 | Shipped | `main` @ 67b774f |
+| 2026-09-12 | 4 | Shipped | `main` @ 67b774f |
+| 2026-09-12 | 5 | Shipped | `main` @ 67b774f |
