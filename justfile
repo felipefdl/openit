@@ -48,7 +48,7 @@ lints-inherit:
   set -euo pipefail
   fail=0
   while IFS= read -r -d '' f; do
-    if ! rg -q '\[lints\]' "$f" || ! rg -q 'workspace = true' "$f"; then
+    if ! grep -qF '[lints]' "$f" || ! grep -qF 'workspace = true' "$f"; then
       echo "missing [lints] workspace = true: $f" >&2
       fail=1
     fi
