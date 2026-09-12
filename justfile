@@ -74,6 +74,7 @@ package *args:
 # Bump the workspace version, commit, and tag. Does not push.
 release version:
   sed -i '' 's/^version = "[^"]*"/version = "{{version}}"/' Cargo.toml
+  sed -i '' 's/openit-core = { path = "crates\/core", version = "[^"]*"/openit-core = { path = "crates\/core", version = "{{version}}"/' Cargo.toml
   cargo update -w -p openit
   git add Cargo.toml Cargo.lock
   git commit -m "chore(release): v{{version}}"
