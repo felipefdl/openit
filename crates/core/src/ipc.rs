@@ -300,7 +300,16 @@ mod tests {
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).expect("listener");
     let paths = [PathBuf::from("/abs/a.md"), PathBuf::from("/abs/b.md")];
-    send_to(&test.name, &paths).expect("client");
+    let start = Instant::now();
+    loop {
+      match send_to(&test.name, &paths) {
+        Ok(()) => break,
+        Err(NoInstance) if start.elapsed() < Duration::from_secs(2) => {
+          std::thread::sleep(Duration::from_millis(20));
+        },
+        Err(error) => panic!("client: {error:?}"),
+      }
+    }
     let received = handle.join().expect("listener thread");
     assert_eq!(received, paths);
   }

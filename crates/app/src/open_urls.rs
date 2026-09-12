@@ -95,7 +95,6 @@ pub fn startup_ready(cx: &mut App) {
 mod tests {
   use std::fs;
   use std::io::Write;
-  use std::path::PathBuf;
   use std::sync::{Arc, Mutex, PoisonError};
 
   use gpui_kit::TestAppContext;
@@ -138,15 +137,17 @@ mod tests {
   #[gpui_kit::test]
   fn open_urls_seam_opens_the_decoded_file_and_logs_other_schemes(cx: &mut TestAppContext) {
     init_app(cx);
-    let path = PathBuf::from("/tmp/a b.md");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a b.md");
     fs::write(&path, "notes").unwrap();
-    struct Cleanup(PathBuf);
-    impl Drop for Cleanup {
-      fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+    let file_url = {
+      let raw = path.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+      if raw.starts_with('/') {
+        format!("file://{raw}")
+      } else {
+        format!("file:///{raw}")
       }
-    }
-    let _cleanup = Cleanup(path.clone());
+    };
 
     let logs = Arc::new(Mutex::new(Vec::<u8>::new()));
     let subscriber = tracing_subscriber::fmt()
@@ -155,7 +156,7 @@ mod tests {
       .finish();
     tracing::subscriber::with_default(subscriber, || {
       cx.update(|cx| {
-        on_open_urls(vec!["file:///tmp/a%20b.md".into(), "https://example.com/x.md".into()], cx);
+        on_open_urls(vec![file_url, "https://example.com/x.md".into()], cx);
       });
     });
     cx.run_until_parked();

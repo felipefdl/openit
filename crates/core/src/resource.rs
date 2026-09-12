@@ -316,7 +316,10 @@ mod tests {
   #[test]
   fn relative_references_without_a_base_are_denied() {
     assert_eq!(resolve("images/a.png", None), Resolved::Denied(DenyReason::NoLocalBase));
+    #[cfg(unix)]
     assert_eq!(resolve("/abs/d.png", None), Resolved::Local("/abs/d.png".into()));
+    #[cfg(windows)]
+    assert_eq!(resolve("/abs/d.png", None), Resolved::Denied(DenyReason::NoLocalBase));
   }
 
   #[test]
