@@ -281,6 +281,9 @@ pub fn reload_user_themes(window: Option<&mut Window>, cx: &mut App) {
 
 /// Switch gpui-component and the active application palette to `id`.
 /// Unknown ids fall back to the default of `wanted`.
+///
+/// Font families come from `[font]` after the color config is applied, so a
+/// theme switch cannot wipe a saved pick. Size fields are left alone.
 pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx: &mut App) {
   let resolved = {
     let catalog = ThemeCatalog::get(cx);
@@ -295,6 +298,7 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
     return;
   };
   Theme::global_mut(cx).apply_config(&config);
+  apply_font_families(cx);
   let refresh_all = window.is_none();
   Theme::change(
     if kind == ThemeKind::Dark {
@@ -309,6 +313,29 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
   if refresh_all {
     refresh_windows(cx);
   }
+}
+
+fn apply_font_families(cx: &mut App) {
+  let (ui, code) = {
+    let font = &cx.global::<AppSettings>().0.font;
+    (font.ui.clone(), font.code.clone())
+  };
+  let installed = cx.text_system().all_font_names();
+  let defaults = Theme::default();
+  let theme = Theme::global_mut(cx);
+  theme.font_family = match ui.as_deref() {
+    Some(name) if is_ui_font(name, &installed) => SharedString::from(name),
+    _ => defaults.font_family,
+  };
+  theme.mono_font_family = match code.as_deref() {
+    Some(name) if installed.iter().any(|family| family == name) => SharedString::from(name),
+    _ => defaults.mono_font_family,
+  };
+}
+
+fn is_ui_font(name: &str, installed: &[String]) -> bool {
+  // GPUI's virtual UI family is valid even when the platform list omits it.
+  name == ".SystemUIFont" || installed.iter().any(|family| family == name)
 }
 
 /// Reapply the configured theme when this window's OS appearance changes.
@@ -530,7 +557,7 @@ mod tests {
   use crate::settings::AppSettings;
   use gpui_kit::component::theme::Theme;
   use gpui_kit::{BorrowAppContext, TestAppContext, WindowAppearance};
-  use openit_core::settings::{Settings, ThemeMode as SettingsThemeMode};
+  use openit_core::settings::{FontSettings, Settings, ThemeMode as SettingsThemeMode};
 
   fn init_theme(cx: &TestAppContext) {
     cx.update(|cx| {
@@ -718,5 +745,81 @@ mod tests {
       assert_eq!(ThemeCatalog::get(cx).kind("editable-dark"), None);
       assert_eq!(ThemeCatalog::get(cx).kind("renamed-dark"), None);
     });
+  }
+
+  fn set_fonts(ui: &str, code: &str, cx: &mut App) {
+    cx.update_global::<AppSettings, _>(|settings, _| {
+      settings.0.font.ui = Some(ui.to_owned());
+      settings.0.font.code = Some(code.to_owned());
+    });
+  }
+
+  #[gpui_kit::test]
+  fn apply_theme_sets_saved_font_families(cx: &TestAppContext) {
+    init_theme(cx);
+    cx.update(|cx| {
+      set_fonts("Helvetica", ".ZedMono", cx);
+      let font_size = Theme::global(cx).font_size;
+      let mono_font_size = Theme::global(cx).mono_font_size;
+      apply_theme("one-dark", ThemeKind::Dark, None, cx);
+      let theme = Theme::global(cx);
+      assert_eq!(theme.font_family.as_ref(), "Helvetica");
+      assert_eq!(theme.mono_font_family.as_ref(), ".ZedMono");
+      assert_eq!(theme.font_size, font_size);
+      assert_eq!(theme.mono_font_size, mono_font_size);
+    });
+  }
+
+  #[gpui_kit::test]
+  fn switching_color_theme_keeps_font_families(cx: &TestAppContext) {
+    init_theme(cx);
+    cx.update(|cx| {
+      set_fonts("Helvetica", ".ZedMono", cx);
+      apply_theme("one-dark", ThemeKind::Dark, None, cx);
+      apply_theme("one-light", ThemeKind::Light, None, cx);
+      let theme = Theme::global(cx);
+      assert_eq!(theme.font_family.as_ref(), "Helvetica");
+      assert_eq!(theme.mono_font_family.as_ref(), ".ZedMono");
+    });
+  }
+
+  #[gpui_kit::test]
+  fn system_ui_font_applies_for_ui_even_if_listed(cx: &TestAppContext) {
+    init_theme(cx);
+    cx.update(|cx| {
+      set_fonts(".SystemUIFont", "Helvetica", cx);
+      apply_theme("one-dark", ThemeKind::Dark, None, cx);
+      let theme = Theme::global(cx);
+      assert_eq!(theme.font_family.as_ref(), ".SystemUIFont");
+      assert_eq!(theme.mono_font_family.as_ref(), "Helvetica");
+    });
+  }
+
+  #[gpui_kit::test]
+  fn a_missing_font_name_uses_the_toolkit_default_and_leaves_the_file(cx: &TestAppContext) {
+    let dir = tempfile::tempdir().expect("settings directory");
+    let path = dir.path().join("settings.toml");
+    let settings = Settings {
+      font: FontSettings {
+        ui: Some("NotARealFont".to_owned()),
+        code: Some("AlsoFake".to_owned()),
+      },
+      ..Settings::default()
+    };
+    settings.save(&path).expect("write settings");
+    let original = std::fs::read_to_string(&path).expect("read settings");
+
+    cx.update(|cx| {
+      gpui_kit::init(cx);
+      let default_ui = Theme::global(cx).font_family.clone();
+      let default_mono = Theme::global(cx).mono_font_family.clone();
+      cx.set_global(AppSettings(settings));
+      cx.set_global(ThemeDirs::default());
+      init(cx);
+      let theme = Theme::global(cx);
+      assert_eq!(theme.font_family, default_ui);
+      assert_eq!(theme.mono_font_family, default_mono);
+    });
+    assert_eq!(std::fs::read_to_string(&path).expect("reread settings"), original);
   }
 }
