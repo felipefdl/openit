@@ -1329,6 +1329,7 @@ impl Render for DocumentView {
       .flex_col()
       .size_full()
       .bg(theme.background)
+      .font_family(theme.font_family.clone())
       .text_color(theme.foreground)
       .child(gpui_kit::base::TextSelectionLayer)
       .when(!self.embedded, |root| root.child(self.render_title_row(cx)))

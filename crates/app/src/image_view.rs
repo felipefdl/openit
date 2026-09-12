@@ -1739,6 +1739,7 @@ impl Render for ImageView {
       .flex_col()
       .size_full()
       .bg(theme.background)
+      .font_family(theme.font_family.clone())
       .text_color(theme.foreground)
       .child(self.render_title_row(cx))
       .child(self.render_body(cx))

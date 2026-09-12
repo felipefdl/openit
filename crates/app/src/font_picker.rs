@@ -105,6 +105,7 @@ impl FontPicker {
         let theme = Theme::global_mut(cx);
         theme.font_family = self.saved_ui.clone();
         theme.mono_font_family = self.saved_code.clone();
+        Theme::sync_base(cx);
         window.refresh();
       },
       Outcome::Committed | Outcome::Cancelled => {},
@@ -131,6 +132,7 @@ impl FontPicker {
       FontSlot::Ui => theme.font_family = SharedString::from(name),
       FontSlot::Code => theme.mono_font_family = SharedString::from(name),
     }
+    Theme::sync_base(cx);
     window.refresh();
   }
 
@@ -363,6 +365,10 @@ mod tests {
       let theme = Theme::global(cx);
       assert_eq!(theme.font_family.as_ref(), preview.as_str());
       assert_eq!(theme.mono_font_family, saved_code);
+      assert_eq!(
+        gpui_kit::base::Theme::global(cx).tokens.typography.sans.as_ref(),
+        preview.as_str(),
+      );
     });
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.close(window, cx)));
@@ -371,6 +377,10 @@ mod tests {
       let theme = Theme::global(cx);
       assert_eq!(theme.font_family, saved_ui);
       assert_eq!(theme.mono_font_family, saved_code);
+      assert_eq!(
+        gpui_kit::base::Theme::global(cx).tokens.typography.sans.as_ref(),
+        saved_ui.as_ref(),
+      );
     });
   }
 

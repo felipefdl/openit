@@ -151,6 +151,7 @@ impl Render for EmptyView {
       .flex_col()
       .size_full()
       .bg(theme.background)
+      .font_family(theme.font_family.clone())
       .text_color(theme.foreground)
       .child(
         TitleBar::new().border_0().bg(theme.background).child(
