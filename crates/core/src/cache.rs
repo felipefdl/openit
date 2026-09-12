@@ -167,7 +167,6 @@ mod tests {
   use std::fs;
   use std::thread;
   use std::time::Duration;
-
   use url::Url;
 
   use super::{MAX_RESOURCE_BYTES, ResourceCache};

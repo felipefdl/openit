@@ -135,9 +135,17 @@ pub(crate) fn write_usage(out: &mut impl Write) -> io::Result<()> {
   writeln!(out, "Usage: openit [path ...]")
 }
 
+#[cfg_attr(
+  not(any(unix, test)),
+  expect(dead_code, reason = "command-link relaunch is unix-only")
+)]
 const PRODUCT_BIN: &str = "OpenIt";
 
 /// Whether this process was started as `oi`/`openit` while the file on disk is `OpenIt`.
+#[cfg_attr(
+  not(any(unix, test)),
+  expect(dead_code, reason = "command-link relaunch is unix-only")
+)]
 pub(crate) fn should_relaunch_as_openit(invoked: &Path, resolved: &Path) -> bool {
   resolved.file_name() == Some(OsStr::new(PRODUCT_BIN)) && invoked.file_name() != Some(OsStr::new(PRODUCT_BIN))
 }
@@ -145,36 +153,34 @@ pub(crate) fn should_relaunch_as_openit(invoked: &Path, resolved: &Path) -> bool
 /// Start `OpenIt` detached and exit, so the shell prompt comes back at once, the way
 /// `open` behaves. The Dock and application menu then use the product name instead of
 /// `oi`. Falls through to running in this process when the child cannot start.
+#[cfg(unix)]
 pub(crate) fn hand_off_under_product_name() {
-  #[cfg(unix)]
-  {
-    use std::os::unix::process::CommandExt as _;
-    use std::process::Stdio;
+  use std::os::unix::process::CommandExt as _;
+  use std::process::Stdio;
 
-    let Some(invoked) = std::env::args_os().next() else {
-      return;
-    };
-    let Ok(exe) = std::env::current_exe() else {
-      return;
-    };
-    let Ok(resolved) = std::fs::canonicalize(&exe) else {
-      return;
-    };
-    if !should_relaunch_as_openit(Path::new(&invoked), &resolved) {
-      return;
-    }
-    match std::process::Command::new(&resolved)
-      .args(std::env::args_os().skip(1))
-      .arg0(PRODUCT_BIN)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .process_group(0)
-      .spawn()
-    {
-      Ok(_) => std::process::exit(0),
-      Err(error) => tracing::error!(%error, "could not start OpenIt; running in this process"),
-    }
+  let Some(invoked) = std::env::args_os().next() else {
+    return;
+  };
+  let Ok(exe) = std::env::current_exe() else {
+    return;
+  };
+  let Ok(resolved) = std::fs::canonicalize(&exe) else {
+    return;
+  };
+  if !should_relaunch_as_openit(Path::new(&invoked), &resolved) {
+    return;
+  }
+  match std::process::Command::new(&resolved)
+    .args(std::env::args_os().skip(1))
+    .arg0(PRODUCT_BIN)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .process_group(0)
+    .spawn()
+  {
+    Ok(_) => std::process::exit(0),
+    Err(error) => tracing::error!(%error, "could not start OpenIt; running in this process"),
   }
 }
 

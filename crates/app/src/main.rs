@@ -680,6 +680,7 @@ fn run_app(paths: Vec<PathBuf>) {
   if ipc::send(&paths).is_ok() {
     return;
   }
+  #[cfg(unix)]
   cli::hand_off_under_product_name();
 
   let app = gpui_kit::application().with_assets(assets::AppAssets);

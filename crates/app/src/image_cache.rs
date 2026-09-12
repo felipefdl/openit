@@ -531,13 +531,12 @@ fn other_error(message: impl Into<String>) -> ImageCacheError {
   ImageCacheError::Other(Arc::new(gpui_kit::private::anyhow::anyhow!(message.into())))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use std::sync::mpsc;
   use std::thread;
   use std::time::Duration;
 
-  #[cfg(unix)]
   #[test]
   fn a_fifo_local_image_is_rejected_without_blocking() {
     let dir = tempfile::tempdir().unwrap();
