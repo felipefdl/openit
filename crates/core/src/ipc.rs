@@ -259,10 +259,13 @@ fn no_instance(error: impl std::fmt::Display) -> NoInstance {
 
 #[cfg(test)]
 mod tests {
+  #[cfg(unix)]
   use std::path::PathBuf;
   use std::time::{Duration, Instant};
 
-  use super::{NoInstance, SocketName, listen_at, send_to};
+  #[cfg(unix)]
+  use super::listen_at;
+  use super::{NoInstance, SocketName, send_to};
 
   struct TestSocket {
     name: SocketName,
