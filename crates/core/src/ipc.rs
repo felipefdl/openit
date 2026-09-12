@@ -288,6 +288,7 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   #[test]
   fn send_round_trips_two_paths() {
     let test = TestSocket::new();

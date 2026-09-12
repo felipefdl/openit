@@ -193,8 +193,12 @@ mod tests {
 
   #[test]
   fn file_urls_decode_to_paths() {
-    let paths = paths_from_open_urls(["file:///tmp/a%20b.md", "https://example.com/x.md"]);
-    let file = url::Url::parse("file:///tmp/a%20b.md").unwrap().to_file_path().unwrap();
+    #[cfg(unix)]
+    let file_url = "file:///tmp/a%20b.md";
+    #[cfg(windows)]
+    let file_url = "file:///C:/tmp/a%20b.md";
+    let paths = paths_from_open_urls([file_url, "https://example.com/x.md"]);
+    let file = url::Url::parse(file_url).unwrap().to_file_path().unwrap();
     assert_eq!(paths, vec![file]);
   }
 }
