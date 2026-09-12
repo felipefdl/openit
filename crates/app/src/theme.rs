@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::highlighter::HighlightThemeStyle;
 use gpui_kit::component::theme::{Theme, ThemeConfig, ThemeConfigColors, ThemeMode as GpuiThemeMode};
-use gpui_kit::{App, Global, Hsla, SharedString, Window, WindowAppearance};
+use gpui_kit::{App, Global, Hsla, SharedString, Subscription, Window, WindowAppearance};
 use openit_core::settings::ThemeMode as SettingsThemeMode;
 use openit_core::theme::{
   Rgba, ThemeKind, ThemeSpec, ThemeStyle, UiPalette, parse_theme_family, parse_theme_family_meta, syntax_styles,
@@ -295,6 +295,7 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
     return;
   };
   Theme::global_mut(cx).apply_config(&config);
+  let refresh_all = window.is_none();
   Theme::change(
     if kind == ThemeKind::Dark {
       GpuiThemeMode::Dark
@@ -305,6 +306,22 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
     cx,
   );
   cx.set_global(ActivePalette(palette));
+  if refresh_all {
+    refresh_windows(cx);
+  }
+}
+
+/// Reapply the configured theme when this window's OS appearance changes.
+pub fn observe_appearance(window: &Window) -> Subscription {
+  window.observe_window_appearance(|window, cx| {
+    apply_for_appearance(window.appearance(), Some(window), cx);
+  })
+}
+
+fn refresh_windows(cx: &mut App) {
+  for handle in cx.windows() {
+    let _ = handle.update(cx, |_, window, _| window.refresh());
+  }
 }
 
 /// Apply the configured light or dark theme for a window appearance.

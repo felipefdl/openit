@@ -10,7 +10,7 @@ use crate::settings::{AppSettings, SettingsStore};
 use crate::status_pickers::{
   GoToLine, GoToLineEvent, LanguagePicker, LanguagePickerEvent, SchemaPicker, SchemaPickerEvent, language_label,
 };
-use crate::theme::{ActivePalette, apply_for_appearance, hsla};
+use crate::theme::{ActivePalette, hsla, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
@@ -217,9 +217,7 @@ impl DocumentView {
       }
       cx.notify();
     }));
-    view.appearance_observation = Some(window.observe_window_appearance(|window, cx| {
-      apply_for_appearance(cx.window_appearance(), Some(window), cx);
-    }));
+    view.appearance_observation = Some(observe_appearance(window));
     view.session.settings_observation = Some(cx.observe_global_in::<AppSettings>(window, |this, window, cx| {
       this.session.schedule_autosave(cx);
       this.image_cache.update(cx, |cache, cx| cache.retry_all(window, cx));

@@ -221,6 +221,8 @@ pub struct PdfView {
   watch_sender: Option<async_channel::Sender<()>>,
   window_handle: AnyWindowHandle,
   focus: FocusHandle,
+  #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
+  appearance_observation: Option<Subscription>,
 }
 
 impl PdfView {
@@ -269,6 +271,7 @@ impl PdfView {
       watch_sender: None,
       window_handle: window.window_handle(),
       focus: cx.focus_handle(),
+      appearance_observation: Some(crate::theme::observe_appearance(window)),
     };
     window.focus(&view.focus, cx);
     Self::install_close_guard(window, cx);

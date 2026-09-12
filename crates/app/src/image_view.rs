@@ -188,6 +188,8 @@ pub struct ImageView {
   nearby_picker: Option<gpui_kit::Entity<NearbyPicker>>,
   export_dialog: Option<gpui_kit::Entity<ExportDialog>>,
   focus: gpui_kit::FocusHandle,
+  #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
+  appearance_observation: Option<gpui_kit::Subscription>,
   release: Option<gpui_kit::Subscription>,
 }
 
@@ -358,6 +360,7 @@ impl ImageView {
       nearby_picker: None,
       export_dialog: None,
       focus: cx.focus_handle(),
+      appearance_observation: Some(crate::theme::observe_appearance(window)),
       release: None,
     };
     window.focus(&view.focus, cx);

@@ -4,18 +4,23 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::{InteractiveElement as _, Styled as _};
 use gpui_kit::{
-  Context, DragMoveEvent, ExternalPaths, FocusHandle, FontWeight, IntoElement, ParentElement as _, Render, Window, div,
-  px, svg,
+  AppContext as _, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle, FontWeight, IntoElement,
+  ParentElement as _, Render, Subscription, Window, div, px, svg,
 };
 
-use crate::actions::{CloseWindow, OpenFile};
+use crate::actions::{CloseWindow, ColorTheme, OpenFile};
 use crate::drop::{apply_external_paths, external_paths_ring};
-use crate::theme::ActivePalette;
+use crate::theme::{ActivePalette, observe_appearance};
+use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 
 /// Fourth root view: no document, no draft, no status bar.
 pub struct EmptyView {
   focus: FocusHandle,
   drop_hover: bool,
+  theme_picker: Option<Entity<ThemePicker>>,
+  theme_picker_subscription: Option<Subscription>,
+  #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
+  appearance_observation: Option<Subscription>,
 }
 
 impl EmptyView {
@@ -23,7 +28,34 @@ impl EmptyView {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     let focus = cx.focus_handle();
     window.focus(&focus, cx);
-    Self { focus, drop_hover: false }
+    Self {
+      focus,
+      drop_hover: false,
+      theme_picker: None,
+      theme_picker_subscription: None,
+      appearance_observation: Some(observe_appearance(window)),
+    }
+  }
+
+  fn open_theme_picker(&mut self, _: &ColorTheme, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(picker) = &self.theme_picker {
+      picker.update(cx, |picker, cx| picker.focus(window, cx));
+      return;
+    }
+    let picker = cx.new(|cx| ThemePicker::new(window, cx));
+    self.theme_picker_subscription =
+      Some(cx.subscribe_in(&picker, window, |this, _, _: &ThemePickerEvent, window, cx| {
+        this.close_theme_picker(window, cx);
+      }));
+    self.theme_picker = Some(picker);
+    cx.notify();
+  }
+
+  fn close_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.theme_picker = None;
+    self.theme_picker_subscription = None;
+    window.focus(&self.focus, cx);
+    cx.notify();
   }
 
   #[allow(clippy::unused_self, reason = "CloseWindow listener signature")]
@@ -62,9 +94,11 @@ impl Render for EmptyView {
       .key_context("EmptyView")
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::close))
+      .on_action(cx.listener(Self::open_theme_picker))
       .on_drag_move(cx.listener(Self::on_external_drag))
       .on_drop(cx.listener(Self::on_external_drop))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
+      .relative()
       .flex()
       .flex_col()
       .size_full()
@@ -105,6 +139,7 @@ impl Render for EmptyView {
           )
           .child(div().text_size(px(12.)).text_color(hint).child("or drag and drop a file")),
       )
+      .children(self.theme_picker.clone().map(IntoElement::into_any_element))
   }
 }
 
@@ -113,11 +148,13 @@ mod tests {
   use std::cell::Cell;
   use std::rc::Rc;
 
-  use gpui_kit::TestAppContext;
+  use gpui_kit::component::theme::Theme;
   use gpui_kit::test::TestWindowExt as _;
+  use gpui_kit::{KeyBinding, TestAppContext, WindowAppearance};
+
   use openit_core::settings::Settings;
 
-  use crate::actions::OpenFile;
+  use crate::actions::{ColorTheme, OpenFile};
 
   use super::EmptyView;
 
@@ -146,5 +183,35 @@ mod tests {
       window.click("select-file", cx);
     });
     assert!(dispatched.get(), "the ghost button dispatches OpenFile");
+  }
+
+  #[gpui_kit::test]
+  fn color_theme_opens_and_escape_closes_it(cx: &mut TestAppContext) {
+    init_app(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-k cmd-t", ColorTheme, None)]));
+    let (view, cx) = cx.add_window_view(EmptyView::new);
+
+    cx.simulate_keystrokes("cmd-k cmd-t");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.theme_picker.is_some()));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.theme_picker.is_none()));
+  }
+
+  #[gpui_kit::test]
+  fn a_window_appearance_change_reapplies_the_theme(cx: &mut TestAppContext) {
+    init_app(cx);
+    let (_view, cx) = cx.add_window_view(EmptyView::new);
+
+    cx.update(|window, cx| {
+      crate::theme::apply_for_appearance(WindowAppearance::Dark, Some(window), cx);
+    });
+    assert!(cx.read_global::<Theme, _>(|theme, _| theme.mode.is_dark()));
+    cx.update(|window, cx| {
+      crate::theme::apply_for_appearance(WindowAppearance::Light, Some(window), cx);
+    });
+    assert!(!cx.read_global::<Theme, _>(|theme, _| theme.mode.is_dark()));
   }
 }
