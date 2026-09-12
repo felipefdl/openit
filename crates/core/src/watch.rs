@@ -162,10 +162,15 @@ mod tests {
     .unwrap();
     std::thread::sleep(Duration::from_millis(200));
     drop(watch);
+    std::thread::sleep(Duration::from_millis(200));
+    while rx.try_recv().is_ok() {}
 
     fs::write(&path, "new").unwrap();
 
-    assert!(rx.recv_timeout(Duration::from_millis(800)).is_err());
+    assert!(
+      rx.recv_timeout(Duration::from_millis(800)).is_err(),
+      "write after drop leaked through"
+    );
   }
 
   #[test]
