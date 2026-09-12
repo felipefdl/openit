@@ -1,0 +1,9 @@
+# nextest configuration for OpenIt.
+# Required gate: cargo nextest run --workspace (see docs/rust-quality.md).
+
+[profile.default]
+# Prefer seeing the full suite on a red run during early development.
+fail-fast = false
+
+[profile.ci]
+fail-fast = false

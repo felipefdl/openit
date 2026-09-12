@@ -1,0 +1,291 @@
+name: Publish Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    # macos-13 is retired. macos-15-intel is the standard x86_64 runner (macos-15-large is a paid larger runner).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            formats: app,dmg
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            formats: app,dmg
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: deb,appimage
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            formats: nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Enable long paths for dependency checkouts
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Cache cargo-packager
+        id: cache-packager
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-packager
+            ~/.cargo/bin/cargo-packager.exe
+          key: cargo-packager-0.11.8-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Linux deps
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libvulkan1 libssl-dev libzstd-dev libfuse2 patchelf
+
+      - name: Import Apple Developer Certificate
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Verify codesigning identity
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_SIGNING_IDENTITY}" ]]; then
+            echo "codesigning identity not found" >&2
+            exit 1
+          fi
+          if ! security find-identity -p codesigning -v 2>/dev/null | grep -F -q -- "${APPLE_SIGNING_IDENTITY}"; then
+            echo "codesigning identity not found" >&2
+            exit 1
+          fi
+
+      - name: Write Apple API key for notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [[ -z "${APPLE_API_KEY}" ]]; then
+            echo "APPLE_API_KEY is empty" >&2
+            missing=1
+          fi
+          if [[ -z "${APPLE_API_ISSUER}" ]]; then
+            echo "APPLE_API_ISSUER is empty" >&2
+            missing=1
+          fi
+          if [[ -z "${APPLE_API_KEY_CONTENT}" ]]; then
+            echo "APPLE_API_KEY_CONTENT is empty" >&2
+            missing=1
+          fi
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+          key_dir="${HOME}/private_keys"
+          mkdir -p "$key_dir"
+          umask 077
+          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key_path"
+          if [[ ! -s "$key_path" ]] || ! grep -q '[^[:space:]]' "$key_path"; then
+            echo "Apple API key file is empty" >&2
+            exit 1
+          fi
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "$GITHUB_ENV"
+
+      # cargo-packager 0.11.8 reads signing-identity from packager config only, not from
+      # APPLE_SIGNING_IDENTITY. --config JSON replaces the whole config, so this job
+      # writes the identity into Cargo.toml for this run.
+      - name: Inject macOS signing identity
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("crates/app/Cargo.toml")
+          text = path.read_text()
+          marker = "[package.metadata.packager.macos]\n"
+          if marker not in text:
+              raise SystemExit("missing [package.metadata.packager.macos]")
+          macos_table = text.split(marker, 1)[1].split("\n[", 1)[0]
+          if "signing-identity" in macos_table or "signingIdentity" in macos_table:
+              raise SystemExit("signing-identity already present")
+          identity = os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
+          if not identity:
+              raise SystemExit("APPLE_SIGNING_IDENTITY is empty")
+          insertion = marker + f"signing-identity = {json.dumps(identity)}\n"
+          path.write_text(text.replace(marker, insertion, 1), newline="\n")
+          PY
+
+      - name: Install cargo-packager
+        if: steps.cache-packager.outputs.cache-hit != 'true'
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Package
+        shell: bash
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: cargo packager --release -p openit --formats "${{ matrix.formats }}"
+
+      - name: Name the macOS app bundle by architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          BUNDLE_ARCH: ${{ matrix.name == 'macos-aarch64' && 'aarch64' || 'x86_64' }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          src="target/release/OpenIt.app.tar.gz"
+          dest="target/release/OpenIt_${VERSION}_${BUNDLE_ARCH}.app.tar.gz"
+          test -f "$src"
+          mv "$src" "$dest"
+          mv "${src}.sig" "${dest}.sig"
+
+      - name: Check packaged artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/release
+          case "${{ matrix.formats }}" in
+            app,dmg)
+              patterns=("*.dmg" "*.dmg.sig" "*.app.tar.gz" "*.app.tar.gz.sig")
+              ;;
+            deb,appimage)
+              patterns=("*.deb" "*.deb.sig" "*.AppImage" "*.AppImage.sig")
+              ;;
+            nsis)
+              patterns=("*-setup.exe" "*-setup.exe.sig")
+              ;;
+            *)
+              echo "unexpected packager formats: ${{ matrix.formats }}" >&2
+              exit 1
+              ;;
+          esac
+          missing=0
+          for pattern in "${patterns[@]}"; do
+            count="$(find . -maxdepth 1 -name "$pattern" -type f | wc -l | tr -d ' ')"
+            if [[ "$count" -eq 0 ]]; then
+              echo "missing artifact matching ${pattern}" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            target/release/*.dmg
+            target/release/*.dmg.sig
+            target/release/*.app.tar.gz
+            target/release/*.app.tar.gz.sig
+            target/release/*.deb
+            target/release/*.deb.sig
+            target/release/*.AppImage
+            target/release/*.AppImage.sig
+            target/release/*-setup.exe
+            target/release/*-setup.exe.sig
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "${TAG#v}" != "${VERSION}" ]]; then
+              echo "tag does not match Cargo.toml version" >&2
+              exit 1
+            fi
+          else
+            TAG="v${VERSION}"
+          fi
+          {
+            echo "VERSION=${VERSION}"
+            echo "TAG=${TAG}"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish draft release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$is_draft" != "true" ]]; then
+              echo "release ${TAG} is published; refusing to replace assets in place" >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "OpenIt v${VERSION}" \
+              --notes "" \
+              --target "${GITHUB_SHA}"
+          fi
+          mapfile -t files < <(find artifacts -type f | sort)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "no artifacts to upload" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "draft release ${TAG}"

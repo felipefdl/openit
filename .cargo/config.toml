@@ -1,0 +1,11 @@
+# Workspace cargo defaults for OpenIt development.
+
+[term]
+quiet = false
+verbose = false
+color = "auto"
+
+[alias]
+xclippy = "clippy --workspace --all-targets --all-features -- -D warnings"
+xtest = "nextest run --workspace"
+xdeny = "deny check"

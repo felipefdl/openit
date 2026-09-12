@@ -1,0 +1,38 @@
+# Clippy configuration for the maximum quality bar.
+# Paired with [workspace.lints] in the root Cargo.toml when the workspace exists.
+
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 100
+type-complexity-threshold = 200
+enum-variant-size-threshold = 200
+future-size-threshold = 16384
+stack-size-threshold = 524288
+trivial-copy-size-limit = 16
+pass-by-value-size-limit = 256
+vec-box-size-threshold = 4096
+array-size-threshold = 512000
+literal-representation-threshold = 16
+
+# Tests may use unwrap/expect/dbg/index; production code may not (lint levels deny them).
+# See https://doc.rust-lang.org/clippy/lint_configuration.html
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# Docs: crate-level rustdoc enforced via missing_docs = deny on public items.
+missing-docs-in-crate-items = true
+msrv = "1.98.1"
+
+disallowed-methods = [
+  { path = "std::env::set_var", reason = "process-wide env mutation is racy; inject config instead" },
+  { path = "std::env::remove_var", reason = "process-wide env mutation is racy; inject config instead" },
+]
+
+disallowed-types = []
+
+# ".." appends to Clippy defaults (do not replace the full list).
+doc-valid-idents = ["OpenIt", "GPUI", "PDFium", "JSONC", "SVG", ".."]

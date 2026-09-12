@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.openit.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>OpenIt</name>
+  <summary>Read a file and make a small correction without opening a workspace</summary>
+
+  <description>
+    <p>
+      OpenIt is a native desktop viewer first and a focused single-file editor
+      when needed: Markdown preview with an editor one keystroke away, text and
+      code editing with syntax highlighting, PDF and image viewing, one window
+      per file. Built in Rust on GPUI.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">OpenIt.desktop</launchable>
+
+  <url type="bugtracker">https://github.com/felipefdl/openit/issues</url>
+  <url type="vcs-browser">https://github.com/felipefdl/openit</url>
+
+  <categories>
+    <category>Utility</category>
+    <category>Viewer</category>
+    <category>TextEditor</category>
+  </categories>
+
+  <provides>
+    <binary>OpenIt</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+</component>

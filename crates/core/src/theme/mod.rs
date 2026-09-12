@@ -1,0 +1,12 @@
+//! Zed-format theme parsing and role-color resolution.
+
+/// Palette role resolution.
+pub mod palette;
+/// Zed theme family parsing and color values.
+pub mod spec;
+/// GPUI-compatible syntax style serialization.
+pub mod syntax;
+
+pub use palette::UiPalette;
+pub use spec::{Player, Rgba, SyntaxToken, ThemeKind, ThemeSpec, ThemeStyle, parse_theme_family};
+pub use syntax::syntax_styles;

@@ -1,0 +1,5 @@
+# cargo-audit configuration for the workspace quality gate.
+# Keep advisory policy aligned with deny.toml [advisories].
+
+[advisories]
+ignore = []

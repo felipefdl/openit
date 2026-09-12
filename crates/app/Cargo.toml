@@ -1,0 +1,160 @@
+[package]
+name = "openit"
+description = "OpenIt desktop application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+default-run = "OpenIt"
+
+[[bin]]
+name = "OpenIt"
+path = "src/main.rs"
+
+[dependencies]
+# Kept ahead of first use so the gate covers the GPUI tree: `cargo deny`,
+# `cargo audit`, and the compile step all run against it from day one.
+openit-core.workspace = true
+lsp-types.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+reqwest_client.workspace = true
+serde.workspace = true
+gpui-kit.workspace = true
+image.workspace = true
+ropey.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+rust-embed.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+resvg.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+openit-core = { workspace = true, features = ["fixtures"] }
+
+[lints]
+workspace = true
+
+[package.metadata.packager]
+before-packaging-command = "cargo build --release -p openit"
+product-name = "OpenIt"
+identifier = "com.openit.app"
+category = "Utility"
+out-dir = "../../target/release"
+icons = [
+  "../../assets/app-icons/icon.icns",
+  "../../assets/app-icons/icon.ico",
+  "../../assets/app-icons/128x128@2x.png",
+  "../../assets/app-icons/128x128.png",
+  "../../assets/app-icons/32x32.png",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "12.0"
+
+[package.metadata.packager.deb]
+depends = [
+  "libx11-6",
+  "libx11-xcb1",
+  "libxcb1",
+  "libxkbcommon0",
+  "libxkbcommon-x11-0",
+  "libwayland-client0",
+  "libwayland-cursor0",
+  "libwayland-egl1",
+  "libfontconfig1",
+]
+files = { "../../assets/metainfo/com.openit.app.metainfo.xml" = "usr/share/metainfo/com.openit.app.metainfo.xml", "../../assets/cli/openit" = "usr/bin/openit", "../../assets/cli/oi" = "usr/bin/oi" }
+
+[package.metadata.packager.appimage]
+
+[package.metadata.packager.nsis]
+installMode = "currentUser"
+preinstall-section = """
+${UnStrLoc}
+
+Section CLI
+  CreateDirectory "$INSTDIR\\bin"
+  FileOpen $0 "$INSTDIR\\bin\\openit.cmd" w
+  FileWrite $0 "@echo off$\\r$\\n$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r$\\n"
+  FileClose $0
+  FileOpen $0 "$INSTDIR\\bin\\oi.cmd" w
+  FileWrite $0 "@echo off$\\r$\\n$\\"%~dp0..\\${MAINBINARYNAME}.exe$\\" %*$\\r$\\n"
+  FileClose $0
+  ReadRegStr $0 HKCU "Environment" "Path"
+  StrCpy $1 "$0;"
+  ${StrLoc} $2 $1 "$INSTDIR\\bin;" ">"
+  StrCmp $2 "" 0 openit_cli_path_done
+  StrCmp $0 "" 0 openit_cli_path_append
+  WriteRegExpandStr HKCU "Environment" "Path" "$INSTDIR\\bin"
+  Goto openit_cli_path_done
+  openit_cli_path_append:
+  WriteRegExpandStr HKCU "Environment" "Path" "$0;$INSTDIR\\bin"
+  openit_cli_path_done:
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x001A, i 0, t "Environment", i 0, i 1000, *i .r0)'
+SectionEnd
+
+Section un.CLI
+  Delete "$INSTDIR\\bin\\openit.cmd"
+  Delete "$INSTDIR\\bin\\oi.cmd"
+  RMDir "$INSTDIR\\bin"
+  ReadRegStr $0 HKCU "Environment" "Path"
+  StrCpy $1 "$0;"
+  ${UnStrLoc} $2 $1 "$INSTDIR\\bin;" ">"
+  StrCmp $2 "" openit_uncli_path_done
+  StrCpy $3 $1 $2
+  StrLen $4 "$INSTDIR\\bin;"
+  IntOp $5 $2 + $4
+  StrCpy $6 $1 "" $5
+  StrCpy $1 "$3$6"
+  StrCpy $0 $1 -1
+  WriteRegExpandStr HKCU "Environment" "Path" $0
+  openit_uncli_path_done:
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x001A, i 0, t "Environment", i 0, i 1000, *i .r0)'
+SectionEnd
+"""
+
+# Copied from openit_core::associations::FILE_ASSOCIATIONS.
+[[package.metadata.packager.file-associations]]
+name = "Markdown"
+extensions = ["md", "markdown", "mdx"]
+role = "editor"
+mime-type = "text/markdown"
+
+[[package.metadata.packager.file-associations]]
+name = "Plain text"
+extensions = [
+  "rs", "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc", "json5", "html", "htm",
+  "css", "scss", "less", "toml", "yaml", "yml", "py", "go", "sh", "bash", "zsh", "sql", "java", "kt",
+  "kts", "swift", "c", "h", "cpp", "cc", "cxx", "hpp", "cs", "rb", "php", "lua", "scala", "ex", "exs",
+  "graphql", "gql", "proto", "zig", "txt", "text", "log", "csv", "env", "ini", "cfg", "conf", "xml",
+]
+role = "editor"
+mime-type = "text/plain"
+
+[[package.metadata.packager.file-associations]]
+name = "Image"
+extensions = [
+  "png", "apng", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "ico", "cur", "tif", "tiff", "tga",
+  "pbm", "pgm", "ppm", "pnm", "pam",
+]
+role = "editor"
+mime-type = "image/png"
+
+[[package.metadata.packager.file-associations]]
+name = "SVG"
+extensions = ["svg", "svgz"]
+role = "editor"
+mime-type = "image/svg+xml"
+
+[[package.metadata.packager.file-associations]]
+name = "PDF"
+extensions = ["pdf"]
+role = "viewer"
+mime-type = "application/pdf"

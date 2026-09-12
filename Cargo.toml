@@ -1,0 +1,164 @@
+# OpenIt virtual workspace. Quality bar: docs/rust-quality.md
+
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "Apache-2.0"
+publish = false
+authors = ["Felipe Lima <felipe@ferreiradelima.com>"]
+repository = "https://github.com/felipefdl/openit"
+description = "Native single-file viewer and editor"
+
+[workspace.dependencies]
+openit-core = { path = "crates/core", version = "0.0.0" }
+url = "2"
+psl = "2"
+percent-encoding = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# JSON, JSONC, and JSON5 with comments, trailing commas, and AST ranges. MIT.
+jsonc-parser = { version = "0.33.1", features = ["serde", "serde_json"] }
+# JSON Schema validation. MIT. Defaults pull reqwest and aws-lc-rs.
+jsonschema = { version = "0.56.0", default-features = false }
+# CompletionItem types for EditorState::lsp_mut().completion_provider.
+lsp-types = "0.97.0"
+toml = "1.1"
+# Session identity for drafts. v4 is random; serde carries it through draft files.
+uuid = { version = "1.26", features = ["v4", "serde"] }
+# GPUI plus gpui-component editor and Markdown surfaces. tree-sitter-languages
+# compiles the syntax highlighting grammars in.
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "tiff",
+  "tga",
+  "pnm",
+] }
+gpui-kit = { version = "0.6.1", features = ["tree-sitter-languages"] }
+# The version gpui-pre 0.3.4 already resolves, so the tree keeps one copy.
+# Static rendering only: no scripts, no animation, no network.
+resvg = { version = "0.46", default-features = false, features = [
+  "text",
+  "system-fonts",
+  "memmap-fonts",
+  "raster-images",
+] }
+# Exact pin mirroring gpui-base 0.6.1, so `EditorState::text()` and core
+# snapshots are one type and share structure instead of copying.
+ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
+# Pure-Rust PDF rasterizer, CPU only. Default features embed the fourteen
+# standard fonts and the predefined CMaps, so rendering needs nothing from the
+# system and nothing is bundled per platform.
+hayro = "0.7"
+# Pure-Rust PDF text extraction and Markdown conversion. Default features only:
+# no OCR, no PDFium.
+pdf-inspector = "1"
+# Folding for PDF search: NFKD splits ligatures, combining marks drop out.
+unicode-normalization = "0.1"
+thiserror = "2.0"
+dirs = "6"
+rust-embed = "8"
+sha2 = "0.10"
+# CC0-1.0; macOS uses FSEvents and Linux uses inotify.
+notify = "8.2"
+async-channel = "2.5"
+# Fuzzy ranking for nearby files. MPL-2.0, already allowed in deny.toml.
+nucleo-matcher = "0.3"
+futures = "0.3"
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.3" }
+tempfile = "3.27"
+tracing = "0.1"
+# Unix domain socket on macOS and Linux, named pipe on Windows, one API.
+interprocess = "2.4.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Line tables keep panic and backtrace locations for workspace code and drop the
+# type debuginfo that dominates test binary size and link time.
+[profile.dev]
+debug = "line-tables-only"
+overflow-checks = true
+
+# Dependencies rebuild only when the lockfile changes, so optimizing them costs
+# one build and pays back on every test run. Workspace crates stay unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+# GPUI's layout and text pipeline is unusable at opt-level 0 even in dev.
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-platform]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-macros]
+opt-level = 3
+
+# Full debug info on demand: `cargo build --profile debugging`.
+[profile.debugging]
+inherits = "dev"
+debug = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+overflow-checks = true
+debug = false
+
+# Build scripts and proc macros are host dylibs that rustc dlopens during the
+# build. Stripping one corrupts its load commands on macOS.
+[profile.release.build-override]
+strip = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+# Groups at deny (priority -1 so individual allows/denies win).
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Allowed noise (docs/rust-quality.md). Do not expand casually.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+double_must_use = "allow"
+redundant_pub_crate = "allow"
+multiple_crate_versions = "allow"
+wildcard_dependencies = "allow"
+cargo_common_metadata = "allow"
+mod_module_files = "allow"
+self_named_module_files = "allow"
+decimal_literal_representation = "allow"
+
+# Selected restriction / panic / silent-fail lints (full restriction group is not enabled).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+as_conversions = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+allow_attributes_without_reason = "deny"
