@@ -513,6 +513,10 @@ pub fn open_draft_window(mut draft: Draft, cx: &mut App) {
     *path = path_identity(path.clone());
   }
   let title = document_title(draft.path.as_deref());
+  if let Some(empty) = empty_window(cx) {
+    let _ = empty.update(cx, |_, window, cx| restore_draft(draft, &title, window, cx));
+    return;
+  }
   let options = document_window_options(title, cx);
   let result = if draft.image.is_some() {
     let Some(store) = cx.global::<Recovery>().0.clone() else {
@@ -542,6 +546,26 @@ pub fn open_draft_window(mut draft: Draft, cx: &mut App) {
   }
 }
 
+fn restore_draft(draft: Draft, title: &SharedString, window: &mut Window, cx: &mut App) {
+  if draft.image.is_some() {
+    let Some(store) = cx.global::<Recovery>().0.clone() else {
+      tracing::error!("no recovery store; the image draft cannot be reopened");
+      return;
+    };
+    match store.read_blob(draft.session) {
+      Ok(bytes) => {
+        window.replace_root(cx, |window, cx| ImageView::restore(draft, bytes, window, cx));
+        window.set_window_title(title);
+      },
+      Err(error) => tracing::error!(%error, "image draft pixels could not be read"),
+    }
+    return;
+  }
+  let kind = draft.path.as_deref().map_or(DocumentKind::Text { language: None }, detect);
+  window.replace_root(cx, |window, cx| DocumentView::restore(draft, kind, window, cx));
+  window.set_window_title(title);
+}
+
 /// Open untitled text, filling an empty window when one exists.
 #[allow(
   clippy::needless_pass_by_ref_mut,
@@ -569,8 +593,9 @@ pub fn open_untitled_text(text: String, cx: &mut App) {
   open_draft_window(draft, cx);
 }
 
-/// Restore persisted drafts before opening command-line paths, skipping paths
-/// that already have a recovered draft.
+/// With no command-line paths, open an empty window immediately, then restore
+/// drafts into it. With paths, restore drafts first and skip paths that already
+/// have a recovered draft.
 #[allow(
   clippy::needless_pass_by_ref_mut,
   reason = "GPUI schedules work from a mutable application callback"
@@ -581,11 +606,15 @@ pub fn open_startup_windows(store: &RecoveryStore, paths: Vec<PathBuf>, cx: &mut
   // Held until every startup window is dispatched, so a handoff cannot decide
   // the launch is empty while drafts are still being listed.
   crate::handoff::started(cx);
+  let fill_empty = paths.is_empty();
+  if fill_empty {
+    open_empty_window(cx);
+  }
   cx.spawn(async move |cx| {
     let result = cx.background_spawn(async move { store.list() }).await;
     cx.update(|cx| {
       let mut identities = HashSet::new();
-      let mut opened = false;
+      let mut opened = fill_empty;
       match result {
         Ok(drafts) => {
           for draft in drafts {
@@ -778,7 +807,11 @@ mod tests {
       .unwrap();
 
     cx.update(|cx| open_startup_windows(&store, vec![draft_path, cli_path], cx));
-    assert_eq!(cx.windows().len(), 0, "draft listing runs off the UI thread");
+    assert_eq!(
+      cx.windows().len(),
+      0,
+      "draft listing runs off the UI thread when paths are given"
+    );
 
     cx.run_until_parked();
     assert_eq!(cx.windows().len(), 2, "the unique command-line path opens after recovery");
@@ -819,9 +852,18 @@ mod tests {
       .unwrap();
 
     cx.update(|cx| open_startup_windows(&store, Vec::new(), cx));
-    assert_eq!(cx.windows().len(), 0);
+    assert_eq!(cx.windows().len(), 1, "an empty window opens before drafts are listed");
     cx.run_until_parked();
     assert_eq!(cx.windows().len(), 1);
+    cx.update(|cx| {
+      let handle = cx.windows().into_iter().next().expect("one window");
+      assert!(
+        handle
+          .update(cx, |_, window, _| window.root::<DocumentView>().flatten().is_some())
+          .unwrap_or(false),
+        "the empty window is filled with the recovered draft"
+      );
+    });
   }
 
   fn write_png(dir: &std::path::Path, name: &str) -> PathBuf {
@@ -969,7 +1011,7 @@ mod tests {
     let store = RecoveryStore::open(dir.path().join("drafts")).unwrap();
 
     cx.update(|cx| open_startup_windows(&store, Vec::new(), cx));
-    assert_eq!(cx.windows().len(), 0, "draft listing runs off the UI thread");
+    assert_eq!(cx.windows().len(), 1, "an empty window opens before drafts are listed");
     cx.run_until_parked();
 
     assert_eq!(cx.windows().len(), 1);

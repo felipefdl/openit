@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use gpui_kit::App;
 use openit_core::document::MAX_IMAGE_BYTES;
 use openit_core::raster::{Transform, transformed};
 use resvg::usvg::fontdb;
@@ -27,15 +26,6 @@ static FONTS: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| {
 /// A handle on the shared font database.
 fn fonts() -> Arc<fontdb::Database> {
   Arc::clone(&FONTS)
-}
-
-/// Start loading system fonts now so the first SVG does not wait for them.
-pub(crate) fn warm_fonts(cx: &App) {
-  cx.background_executor()
-    .spawn(async {
-      let _ = fonts();
-    })
-    .detach();
 }
 
 /// Clamp a window or fit scale into the display raster budget.

@@ -320,22 +320,10 @@ fn apply_font_families(cx: &mut App) {
     let font = &cx.global::<AppSettings>().0.font;
     (font.ui.clone(), font.code.clone())
   };
-  let installed = cx.text_system().all_font_names();
   let defaults = Theme::default();
   let theme = Theme::global_mut(cx);
-  theme.font_family = match ui.as_deref() {
-    Some(name) if is_ui_font(name, &installed) => SharedString::from(name),
-    _ => defaults.font_family,
-  };
-  theme.mono_font_family = match code.as_deref() {
-    Some(name) if installed.iter().any(|family| family == name) => SharedString::from(name),
-    _ => defaults.mono_font_family,
-  };
-}
-
-fn is_ui_font(name: &str, installed: &[String]) -> bool {
-  // GPUI's virtual UI family is valid even when the platform list omits it.
-  name == ".SystemUIFont" || installed.iter().any(|family| family == name)
+  theme.font_family = ui.map_or(defaults.font_family, SharedString::from);
+  theme.mono_font_family = code.map_or(defaults.mono_font_family, SharedString::from);
 }
 
 /// Reapply the configured theme when this window's OS appearance changes.
@@ -796,7 +784,7 @@ mod tests {
   }
 
   #[gpui_kit::test]
-  fn a_missing_font_name_uses_the_toolkit_default_and_leaves_the_file(cx: &TestAppContext) {
+  fn a_missing_font_name_is_applied_and_leaves_the_file(cx: &TestAppContext) {
     let dir = tempfile::tempdir().expect("settings directory");
     let path = dir.path().join("settings.toml");
     let settings = Settings {
@@ -811,14 +799,12 @@ mod tests {
 
     cx.update(|cx| {
       gpui_kit::init(cx);
-      let default_ui = Theme::global(cx).font_family.clone();
-      let default_mono = Theme::global(cx).mono_font_family.clone();
       cx.set_global(AppSettings(settings));
       cx.set_global(ThemeDirs::default());
       init(cx);
       let theme = Theme::global(cx);
-      assert_eq!(theme.font_family, default_ui);
-      assert_eq!(theme.mono_font_family, default_mono);
+      assert_eq!(theme.font_family.as_ref(), "NotARealFont");
+      assert_eq!(theme.mono_font_family.as_ref(), "AlsoFake");
     });
     assert_eq!(std::fs::read_to_string(&path).expect("reread settings"), original);
   }

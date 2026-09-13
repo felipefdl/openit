@@ -674,7 +674,6 @@ fn main() {
 fn attach_app_handlers(cx: &mut App) {
   bind_keys(cx);
   menus::install(cx);
-  svg::warm_fonts(cx);
   install_app_settings_observer(cx);
   cx.set_global(PendingCleanups::default());
   cx.set_global(QuitInProgress::default());
@@ -744,10 +743,6 @@ fn run_app(paths: Vec<PathBuf>) {
       user: dirs::config_dir().map(|path| path.join("openit").join("themes")),
     });
     theme::init(cx);
-    match reqwest_client::ReqwestClient::user_agent(&format!("openit/{}", env!("CARGO_PKG_VERSION"))) {
-      Ok(client) => cx.set_http_client(Arc::new(client)),
-      Err(error) => tracing::error!(%error, "could not initialize HTTP client; using default client"),
-    }
     if let Some(cache) = ResourceCacheHandle::open() {
       let prune_cache = Arc::clone(&cache.0);
       cx.set_global(cache);
@@ -760,15 +755,11 @@ fn run_app(paths: Vec<PathBuf>) {
     } else {
       tracing::error!("resource cache unavailable; continuing without a cache");
     }
-    cx.set_global(Fetcher(Arc::new(HttpFetcher::new(cx.http_client()))));
     cx.set_app_identity("com.openit.app", "OpenIt");
     attach_app_handlers(cx);
     let store = open_recovery_store();
     cx.set_global(Recovery(store.clone()));
 
-    if let Some(path) = settings_path {
-      watch_settings(path, cx);
-    }
     crate::open_urls::listen(open_url_rx, cx);
     if !start_open_request_listener(&paths, cx) {
       cx.quit();
@@ -788,6 +779,14 @@ fn run_app(paths: Vec<PathBuf>) {
       crate::open_urls::startup_ready(cx);
     }
     cx.activate(true);
+    match reqwest_client::ReqwestClient::user_agent(&format!("openit/{}", env!("CARGO_PKG_VERSION"))) {
+      Ok(client) => cx.set_http_client(Arc::new(client)),
+      Err(error) => tracing::error!(%error, "could not initialize HTTP client; using default client"),
+    }
+    cx.set_global(Fetcher(Arc::new(HttpFetcher::new(cx.http_client()))));
+    if let Some(path) = settings_path {
+      watch_settings(path, cx);
+    }
   });
 }
 #[cfg(test)]
