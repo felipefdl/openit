@@ -22,7 +22,7 @@ percent-encoding = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # JSON, JSONC, and JSON5 with comments, trailing commas, and AST ranges. MIT.
-jsonc-parser = { version = "0.33.1", features = ["serde", "serde_json"] }
+jsonc-parser = { version = "0.33.2", features = ["serde", "serde_json"] }
 # JSON Schema validation. MIT. Defaults pull reqwest and aws-lc-rs.
 jsonschema = { version = "0.56.0", default-features = false }
 # CompletionItem types for EditorState::lsp_mut().completion_provider.
@@ -65,16 +65,16 @@ pdf-inspector = "1"
 # Folding for PDF search: NFKD splits ligatures, combining marks drop out.
 unicode-normalization = "0.1"
 thiserror = "2.0"
-dirs = "6"
+dirs = "7"
 rust-embed = "8"
-sha2 = "0.10"
+sha2 = "0.11"
 # CC0-1.0; macOS uses FSEvents and Linux uses inotify.
 notify = "8.2"
 async-channel = "2.5"
 # Fuzzy ranking for nearby files. MPL-2.0, already allowed in deny.toml.
 nucleo-matcher = "0.3"
 futures = "0.3"
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.3" }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
 tempfile = "3.27"
 tracing = "0.1"
 # Unix domain socket on macOS and Linux, named pipe on Windows, one API.

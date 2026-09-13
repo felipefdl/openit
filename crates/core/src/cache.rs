@@ -1,5 +1,6 @@
 //! On-disk cache for remote resources.
 
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
@@ -158,7 +159,11 @@ impl ResourceCache {
 
   fn path_for(&self, url: &Url) -> PathBuf {
     let digest = Sha256::digest(url.as_str().as_bytes());
-    self.dir.join(format!("{digest:x}"))
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+      let _ = FmtWrite::write_fmt(&mut hex, format_args!("{byte:02x}"));
+    }
+    self.dir.join(hex)
   }
 }
 
