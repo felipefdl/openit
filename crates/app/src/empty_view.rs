@@ -13,6 +13,7 @@ use crate::drop::{apply_external_paths, external_paths_ring};
 use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::theme::{ActivePalette, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
+use crate::updater::dialog::{UpdateEvent, UpdateView};
 
 /// Fourth root view: no document, no draft, no status bar.
 pub struct EmptyView {
@@ -22,6 +23,8 @@ pub struct EmptyView {
   theme_picker_subscription: Option<Subscription>,
   font_picker: Option<Entity<FontPicker>>,
   font_picker_subscription: Option<Subscription>,
+  update_view: Option<Entity<UpdateView>>,
+  update_view_subscription: Option<Subscription>,
   #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
   appearance_observation: Option<Subscription>,
 }
@@ -38,11 +41,14 @@ impl EmptyView {
       theme_picker_subscription: None,
       font_picker: None,
       font_picker_subscription: None,
+      update_view: None,
+      update_view_subscription: None,
       appearance_observation: Some(observe_appearance(window)),
     }
   }
 
   fn open_theme_picker(&mut self, _: &ColorTheme, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     self.dismiss_font_picker(window, cx);
     if let Some(picker) = &self.theme_picker {
       picker.update(cx, |picker, cx| picker.focus(window, cx));
@@ -73,6 +79,7 @@ impl EmptyView {
   }
 
   fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     self.close_theme_picker(window, cx);
     if let Some(picker) = &self.font_picker {
       if picker.read(cx).slot() == slot {
@@ -102,6 +109,40 @@ impl EmptyView {
       picker.update(cx, |picker, cx| picker.finish(window, cx));
     }
     self.font_picker_subscription = None;
+  }
+
+  fn dismiss_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(picker) = self.theme_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    self.theme_picker_subscription = None;
+  }
+
+  fn dismiss_updates(&mut self) {
+    self.update_view = None;
+    self.update_view_subscription = None;
+  }
+
+  /// Open the updates modal, or refocus it when already open.
+  pub(crate) fn open_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(view) = &self.update_view {
+      view.update(cx, |view, cx| view.focus(window, cx));
+      return;
+    }
+    self.dismiss_theme_picker(window, cx);
+    self.dismiss_font_picker(window, cx);
+    let view = cx.new(|cx| UpdateView::new(window, cx));
+    self.update_view_subscription = Some(cx.subscribe_in(&view, window, |this, _, _: &UpdateEvent, window, cx| {
+      this.close_updates(window, cx);
+    }));
+    self.update_view = Some(view);
+    cx.notify();
+  }
+
+  fn close_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
+    window.focus(&self.focus, cx);
+    cx.notify();
   }
 
   #[allow(clippy::unused_self, reason = "CloseWindow listener signature")]
@@ -190,6 +231,7 @@ impl Render for EmptyView {
       )
       .children(self.theme_picker.clone().map(IntoElement::into_any_element))
       .children(self.font_picker.clone().map(IntoElement::into_any_element))
+      .children(self.update_view.clone().map(IntoElement::into_any_element))
   }
 }
 

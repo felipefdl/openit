@@ -31,6 +31,7 @@ mod svg;
 mod theme;
 mod theme_picker;
 mod title_bar;
+mod updater;
 mod window;
 
 use std::path::PathBuf;
@@ -542,6 +543,7 @@ fn open_recovery_store() -> Option<Arc<RecoveryStore>> {
 /// window, where `cmd-r`, `cmd-l`, and `cmd-f` cannot collide with a text action.
 fn bind_keys(cx: &mut App) {
   cx.bind_keys([
+    KeyBinding::new("escape", gpui_kit::component::input::Escape, Some("Updates")),
     KeyBinding::new("cmd-s", actions::Save, None),
     KeyBinding::new("ctrl-s", actions::Save, None),
     KeyBinding::new("cmd-o", actions::OpenFile, None),
@@ -701,6 +703,7 @@ fn attach_app_handlers(cx: &mut App) {
   cx.on_action(|_: &actions::ToggleAlwaysShowStatusBar, cx| handle_toggle_always_show_status_bar(cx));
   cx.on_action(|_: &actions::OpenFile, cx| handle_open_file(cx));
   cx.on_action(|_: &actions::NewFromClipboard, cx| handle_new_from_clipboard(cx));
+  cx.on_action(|_: &actions::CheckForUpdates, cx| crate::updater::check_from_menu(cx));
   #[cfg(target_os = "macos")]
   cx.on_action(|_: &actions::InstallCommandLineTools, cx| cli_install::open_window(cx));
   cx.on_action(|_: &actions::Quit, cx| {
@@ -756,6 +759,7 @@ fn run_app(paths: Vec<PathBuf>) {
       tracing::error!("resource cache unavailable; continuing without a cache");
     }
     cx.set_app_identity("com.openit.app", "OpenIt");
+    cx.set_global(crate::updater::UpdaterState::default());
     attach_app_handlers(cx);
     let store = open_recovery_store();
     cx.set_global(Recovery(store.clone()));
@@ -786,6 +790,9 @@ fn run_app(paths: Vec<PathBuf>) {
     cx.set_global(Fetcher(Arc::new(HttpFetcher::new(cx.http_client()))));
     if let Some(path) = settings_path {
       watch_settings(path, cx);
+    }
+    if crate::updater::should_auto_check(cfg!(debug_assertions), cx.global::<AppSettings>().0.auto_check_updates) {
+      crate::updater::schedule_auto_check(cx);
     }
   });
 }

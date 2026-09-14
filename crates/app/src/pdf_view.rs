@@ -39,6 +39,7 @@ use crate::pdf_prompts::{GoToPage as GoToPagePrompt, GoToPageEvent, PasswordProm
 use crate::session::PendingCleanups;
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button};
+use crate::updater::dialog::{UpdateEvent, UpdateView};
 
 /// Space above, below, and between pages, in window pixels.
 const PAGE_GAP: f32 = 16.0;
@@ -166,6 +167,8 @@ enum Prompt {
   Font(Entity<FontPicker>),
   /// The nearby-files picker.
   Nearby(Entity<NearbyPicker>),
+  /// The in-app updates dialog.
+  Updates(Entity<UpdateView>),
 }
 
 impl Prompt {
@@ -176,6 +179,7 @@ impl Prompt {
       Self::Theme(view) => view.clone().into_any_element(),
       Self::Font(view) => view.clone().into_any_element(),
       Self::Nearby(view) => view.clone().into_any_element(),
+      Self::Updates(view) => view.clone().into_any_element(),
     }
   }
 }
@@ -528,10 +532,35 @@ impl PdfView {
     cx.notify();
   }
 
+  pub(crate) fn open_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(Prompt::Updates(view)) = &self.prompt {
+      view.update(cx, |view, cx| view.focus(window, cx));
+      return;
+    }
+    match &self.prompt {
+      Some(Prompt::Theme(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      Some(Prompt::Font(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      _ => {},
+    }
+    if let Some(markdown) = &self.markdown {
+      markdown.update(cx, |document, cx| document.dismiss_overlay(window, cx));
+    }
+    let view = cx.new(|cx| UpdateView::new(window, cx));
+    self.prompt_subscription = Some(cx.subscribe_in(&view, window, |this, _, _: &UpdateEvent, window, cx| {
+      this.close_prompt(window, cx);
+    }));
+    self.prompt = Some(Prompt::Updates(view));
+    cx.notify();
+  }
+
   fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.prompt = None;
     self.prompt_subscription = None;
-    window.focus(&self.focus, cx);
+    if let Some(document) = self.markdown.clone().filter(|_| self.shows_markdown()) {
+      document.update(cx, |document, cx| document.focus_surface(window, cx));
+    } else {
+      window.focus(&self.focus, cx);
+    }
     cx.notify();
   }
 

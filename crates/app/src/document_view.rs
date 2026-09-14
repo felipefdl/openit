@@ -14,6 +14,7 @@ use crate::status_pickers::{
 use crate::theme::{ActivePalette, hsla, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button};
+use crate::updater::dialog::{UpdateEvent, UpdateView};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, RopeExt, TabSize};
 use gpui_kit::component::text::{SelectionFormat, TextView, TextViewState, TextViewStyle};
@@ -85,6 +86,7 @@ enum Overlay {
   Schema(Entity<SchemaPicker>),
   GoToLine(Entity<GoToLine>),
   Nearby(Entity<NearbyPicker>),
+  Updates(Entity<UpdateView>),
 }
 impl Overlay {
   fn element(&self) -> AnyElement {
@@ -95,6 +97,7 @@ impl Overlay {
       Self::Schema(view) => view.clone().into_any_element(),
       Self::GoToLine(view) => view.clone().into_any_element(),
       Self::Nearby(view) => view.clone().into_any_element(),
+      Self::Updates(view) => view.clone().into_any_element(),
     }
   }
 }
@@ -835,6 +838,30 @@ impl DocumentView {
     self.overlay = Some(Overlay::GoToLine(prompt));
     cx.notify();
   }
+  /// Open the updates modal, or refocus it when already open.
+  pub(crate) fn open_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(Overlay::Updates(view)) = &self.overlay {
+      view.update(cx, |view, cx| view.focus(window, cx));
+      return;
+    }
+    self.dismiss_overlay(window, cx);
+    let view = cx.new(|cx| UpdateView::new(window, cx));
+    self.overlay_subscription = Some(cx.subscribe_in(&view, window, |this, _, _: &UpdateEvent, window, cx| {
+      this.close_overlay(window, cx);
+    }));
+    self.overlay = Some(Overlay::Updates(view));
+    cx.notify();
+  }
+
+  pub(crate) fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    match &self.overlay {
+      Some(Overlay::Theme(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      Some(Overlay::Font(picker)) => picker.update(cx, |picker, cx| picker.finish(window, cx)),
+      _ => {},
+    }
+    self.close_overlay(window, cx);
+  }
+
   fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.overlay = None;
     self.overlay_subscription = None;

@@ -95,6 +95,8 @@ actions!(
     ConvertToMarkdown,
     /// Show the PDF pages again.
     PdfPages,
+    /// Open the Updates modal and check GitHub Releases.
+    CheckForUpdates,
     /// Open the command line tools install window.
     InstallCommandLineTools,
   ]

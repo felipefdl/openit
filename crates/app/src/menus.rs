@@ -3,10 +3,10 @@ use gpui_kit::{App, Menu, MenuItem, OsAction};
 use openit_core::settings::{MarkdownPreviewWidth, Settings, ThemeMode};
 
 use crate::actions::{
-  ActualSize, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find, FlipHorizontal,
-  FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages, Quit, RotateLeft,
-  RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode, ToggleAlwaysShowStatusBar, ToggleMode,
-  UiFont, ZoomIn, ZoomOut, ZoomToFit,
+  ActualSize, CheckForUpdates, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find,
+  FlipHorizontal, FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages,
+  Quit, RotateLeft, RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode,
+  ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 
@@ -48,6 +48,8 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
     app_items.push(MenuItem::action("Install Command Line Tools...", InstallCommandLineTools));
     app_items.push(MenuItem::separator());
   }
+  app_items.push(MenuItem::action("Check for Updates...", CheckForUpdates));
+  app_items.push(MenuItem::separator());
   app_items.push(MenuItem::action("Quit OpenIt", Quit));
   vec![
     Menu::new("OpenIt").items(app_items),
@@ -138,6 +140,16 @@ mod tests {
       .flat_map(|menu| menu.items)
       .any(|item| matches!(item, MenuItem::Action { name, .. } if name == "Go to File..."));
     assert!(listed, "the File menu lists Go to File...");
+  }
+
+  #[test]
+  fn openit_menu_lists_check_for_updates() {
+    let listed = super::build(&Settings::default())
+      .into_iter()
+      .filter(|menu| menu.name == "OpenIt")
+      .flat_map(|menu| menu.items)
+      .any(|item| matches!(item, MenuItem::Action { name, .. } if name == "Check for Updates..."));
+    assert!(listed, "the OpenIt menu lists Check for Updates...");
   }
 
   #[cfg(target_os = "macos")]

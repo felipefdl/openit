@@ -49,6 +49,8 @@ Installers are on [GitHub Releases](https://github.com/felipefdl/openit/releases
 
 The AppImage does not ship `openit` or `oi`. Symlink those by hand.
 
+`OpenIt > Check for Updates...` checks GitHub Releases. Checking on launch is opt-in.
+
 ## Build
 
 Requires Rust 1.98.1 or newer and [`just`](https://github.com/casey/just).

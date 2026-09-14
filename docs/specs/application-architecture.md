@@ -25,7 +25,7 @@ Alternatives considered and rejected:
 | Module | Responsibility | Depends on |
 | --- | --- | --- |
 | Document library (Rust crate, no GPUI) | Loading and saving, draft recovery, format detection, schema validation, resource policy and resolver, settings model, PDF page rendering, text layer, and Markdown conversion | `ropey`, `jsonschema`, `jsonc-parser`, `psl`, `image`, `hayro`, `pdf-inspector` |
-| Desktop application (GPUI) | Windows, document sessions, editor and reader surfaces, menus, shortcuts, clipboard, drag and drop, open-request routing, permission bar | Document library, gpui-kit |
+| Desktop application (GPUI) | Windows, document sessions, editor and reader surfaces, menus, shortcuts, clipboard, drag and drop, open-request routing, permission bar, update checks | Document library, gpui-kit |
 | `openit` command | The app binary is the command: it turns arguments into open requests and hands them to the running instance or starts one | Desktop application |
 | Quick Look extension (macOS) | Read-only static presentation of supported types inside Finder | Document library only |
 
@@ -326,13 +326,23 @@ The status bar shows metadata on the left and the file type on the right. For te
 
 The bar floats over the text while editing, where a translucent strip reads well against a scrolling buffer. In every other view it takes its own opaque row, so an image, a page, or a rendered document is never covered by it. Markdown preview hides the status bar and editing shows it. `View > Always Show Status Bar` (`always_show_status_bar`, default `false`) pins it visible in both. A source warning, a save error, or a settings error shows it regardless of mode or setting.
 
-Native menus: `OpenIt` (Install Command Line Tools... (macOS), Quit), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for PDFs), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). The binary is named `OpenIt` so the platform shows that name in the application menu.
+Native menus: `OpenIt` (Install Command Line Tools... (macOS), Check for Updates..., Quit), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for PDFs), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). The binary is named `OpenIt` so the platform shows that name in the application menu.
 
 ### Settings
 
-One TOML file in the platform config directory: autosave, `always_show_status_bar` (default `false`), `allow_remote` (default `false`), `allowed_domains` (default `github.com`, `githubusercontent.com`, `schemastore.org`), `[theme]`: `mode` (`system` | `light` | `dark`), `light`, `dark` theme ids, `[font]`: `ui` (UI Font) and `code` (Code Font), manual schema choices, and the session window list used for recovery. Changes apply to open windows without restart. View > Font > UI Font... and Cmd/Ctrl+K Cmd/Ctrl+U write `ui`; View > Font > Code Font... and Cmd/Ctrl+K Cmd/Ctrl+C write `code`.
+One TOML file in the platform config directory: autosave, `auto_check_updates` (default `false`), `always_show_status_bar` (default `false`), `allow_remote` (default `false`), `allowed_domains` (default `github.com`, `githubusercontent.com`, `schemastore.org`), `[theme]`: `mode` (`system` | `light` | `dark`), `light`, `dark` theme ids, `[font]`: `ui` (UI Font) and `code` (Code Font), manual schema choices, and the session window list used for recovery. Changes apply to open windows without restart. View > Font > UI Font... and Cmd/Ctrl+K Cmd/Ctrl+U write `ui`; View > Font > Code Font... and Cmd/Ctrl+K Cmd/Ctrl+C write `code`.
 
 Markdown preferences use `markdown_preview_width` (`readable` | `wide` | `full_width`, default `readable`) and `markdown_mode` (`preview` | `edit`, default `preview`). Width changes apply to open previews; the mode preference only controls newly opened or restored Markdown windows. Opening other text formats does not change the remembered Markdown mode.
+
+### Updates
+
+Packaged builds check GitHub Releases through cargo-packager-updater. The manifest is `https://github.com/felipefdl/openit/releases/latest/download/latest.json`. Bundles are minisign-verified with the packager public key. Debug builds never check on their own.
+
+`OpenIt > Check for Updates...` opens the Updates modal in the current window and checks immediately. The modal shows the running version, whether a newer package exists, download progress, and a Check automatically checkbox. Install downloads, verifies, and relaunches.
+
+`auto_check_updates` is the opt-in. When it is on, a packaged app checks once a few seconds after launch. An available update opens the same modal. Up to date and failed automatic checks stay silent aside from a log line. Checking never runs until the user asks or opts in.
+
+Publish writes `latest.json` onto the GitHub release. Platform keys are `macos-aarch64`, `macos-x86_64`, `linux-x86_64`, and `windows-x86_64`. Each entry has `signature`, `url`, and `format` (`app` / `appimage` / `nsis`). dmg and deb signatures are release assets only.
 
 ### Quick Look
 
@@ -356,7 +366,7 @@ Thresholds come from the first measured baseline, not from assumptions about Rus
 ## Testing
 
 - Document library: unit tests for save and recovery semantics, external-change conflicts, format detection, schema precedence, resolver domain-family and path rules, JSONC diagnostic positions, PDF page geometry and text-box mapping, search normalization, and Markdown figure substitution.
-- Desktop application: a small integration harness for mode switching (position and editor state retained), open-request routing, the permission bar flow, and the PDF reader (page layout, go-to-page, find stepping, selection copy, conversion opening its window). No screenshot tests.
+- Desktop application: a small integration harness for mode switching (position and editor state retained), open-request routing, the permission bar flow, the PDF reader (page layout, go-to-page, find stepping, selection copy, conversion opening its window), and update checks. No screenshot tests.
 
 ## Prototype gates
 
@@ -364,7 +374,7 @@ The feasibility checks and upstream limitations are tracked in [Blocked features
 
 ## Dependencies and licensing
 
-OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apache-2.0. `image` is MIT OR Apache-2.0. `resvg`, `usvg`, `tiny-skia`, and `fontdb` are MIT OR Apache-2.0. `jsonschema` and `jsonc-parser` are MIT. `psl` is MIT OR Apache-2.0. `hayro` and its crates are MIT OR Apache-2.0 (its embedded standard-font substitutes and CMaps carry their own permissive notices inside the crate). `pdf-inspector` is MIT and `lopdf` is MIT. Directly copied Apache-2.0 code carries its notice. Other products' names, logos, and bundled icon assets are excluded.
+OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apache-2.0. `image` is MIT OR Apache-2.0. `resvg`, `usvg`, `tiny-skia`, and `fontdb` are MIT OR Apache-2.0. `jsonschema` and `jsonc-parser` are MIT. `psl` is MIT OR Apache-2.0. `hayro` and its crates are MIT OR Apache-2.0 (its embedded standard-font substitutes and CMaps carry their own permissive notices inside the crate). `pdf-inspector` is MIT and `lopdf` is MIT. `cargo-packager-updater` is Apache-2.0 OR MIT. Directly copied Apache-2.0 code carries its notice. Other products' names, logos, and bundled icon assets are excluded.
 
 ## References
 
@@ -405,3 +415,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-09-11: Configuration validation points at [Schema validation](schema-validation.md): quiet status name, schema completions, and fetch failure as a log line only.
 - 2026-09-12: Closing the last window quits on Linux and Windows through the existing quit path, unless an open is still in flight. macOS stays resident with no windows so Dock reopen can show an empty one.
 - 2026-09-12: Font selector: UI Font and Code Font persist across color-theme switches; View > Font, Cmd/Ctrl+K Cmd/Ctrl+U, and Cmd/Ctrl+K Cmd/Ctrl+C open the pickers. Details in [Font selector](font-selector.md).
+- 2026-09-14: Updates: `OpenIt > Check for Updates...` opens a modal that checks GitHub Releases; `auto_check_updates` is opt-in and does not run on launch until enabled. Publish writes `latest.json`.

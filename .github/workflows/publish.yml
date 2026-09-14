@@ -263,6 +263,77 @@ jobs:
             echo "TAG=${TAG}"
           } >> "$GITHUB_ENV"
 
+      - name: Validate artifacts and generate latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+          artifacts = Path("artifacts")
+
+          # cargo-packager-updater 0.2.3 keys are macos-/linux-/windows-{arch}, not darwin-*.
+          # format is required on each platform (app / appimage / nsis).
+          # dmg and deb signatures are release assets only; they are not updater platforms.
+          selectors = {
+              "macos-aarch64": ("app.tar.gz", "app"),
+              "macos-x86_64": ("app.tar.gz", "app"),
+              "linux-x86_64": (".appimage", "appimage"),
+              "windows-x86_64": ("-setup.exe", "nsis"),
+          }
+          required = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "windows-x86_64")
+
+          platforms = {}
+          for platform, (suffix, fmt) in selectors.items():
+              folder = artifacts / platform
+              if not folder.is_dir():
+                  continue
+              matches = [
+                  path
+                  for path in folder.glob("*.sig")
+                  if path.name[: -len(".sig")].lower().endswith(suffix.lower())
+              ]
+              if not matches:
+                  continue
+              if len(matches) != 1:
+                  names = ", ".join(path.name for path in matches)
+                  raise SystemExit(f"{platform}: expected one updater .sig, found: {names}")
+              sig_path = matches[0]
+              asset_name = sig_path.name[: -len(".sig")]
+              asset_path = folder / asset_name
+              if not asset_path.is_file():
+                  continue
+              signature = sig_path.read_text().strip()
+              if not signature:
+                  raise SystemExit(f"{sig_path} is empty")
+              platforms[platform] = {
+                  "signature": signature,
+                  "url": f"{base}/{asset_path.name}",
+                  "format": fmt,
+              }
+
+          missing = [name for name in required if name not in platforms]
+          if missing:
+              raise SystemExit("missing required updater platforms: " + ", ".join(missing))
+
+          ordered = {name: platforms[name] for name in selectors if name in platforms}
+          manifest = {
+              "version": version,
+              "notes": "",
+              "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": ordered,
+          }
+          Path("latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print("latest.json platforms:", ", ".join(ordered))
+          PY
+
       - name: Publish draft release
         shell: bash
         env:
@@ -288,4 +359,6 @@ jobs:
             exit 1
           fi
           gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber
           echo "draft release ${TAG}"
+          jq -r '.platforms | keys[]' latest.json

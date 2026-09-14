@@ -35,6 +35,7 @@ use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
 use crate::session::{CHECKPOINT_DELAY, PendingCleanups, Recovery};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button};
+use crate::updater::dialog::{UpdateEvent, UpdateView};
 use crate::{image_decode, svg};
 
 /// Decode the document, apply the transform, and encode it for export.
@@ -189,6 +190,8 @@ pub struct ImageView {
   font_picker: Option<gpui_kit::Entity<FontPicker>>,
   nearby_picker: Option<gpui_kit::Entity<NearbyPicker>>,
   export_dialog: Option<gpui_kit::Entity<ExportDialog>>,
+  updates: Option<gpui_kit::Entity<UpdateView>>,
+  updates_subscription: Option<gpui_kit::Subscription>,
   focus: gpui_kit::FocusHandle,
   #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
   appearance_observation: Option<gpui_kit::Subscription>,
@@ -362,6 +365,8 @@ impl ImageView {
       font_picker: None,
       nearby_picker: None,
       export_dialog: None,
+      updates: None,
+      updates_subscription: None,
       focus: cx.focus_handle(),
       appearance_observation: Some(crate::theme::observe_appearance(window)),
       release: None,
@@ -888,6 +893,7 @@ impl ImageView {
 
   /// Open the export dialog for the image as it is shown.
   fn open_export(&mut self, _: &Export, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     let (width, height) = self.transform.apply_to_size(self.width, self.height);
     let has_alpha = self.decoded.as_ref().is_some_and(|decoded| decoded.has_alpha);
     let stem = self
@@ -1315,6 +1321,7 @@ impl ImageView {
   }
 
   fn open_theme_picker(&mut self, _: &ColorTheme, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     if let Some(picker) = self.font_picker.take() {
       picker.update(cx, |picker, cx| picker.finish(window, cx));
     }
@@ -1339,6 +1346,7 @@ impl ImageView {
   }
 
   fn open_font_picker(&mut self, slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     if let Some(picker) = self.theme_picker.take() {
       picker.update(cx, |picker, cx| picker.finish(window, cx));
     }
@@ -1362,6 +1370,7 @@ impl ImageView {
   }
 
   fn open_nearby_picker(&mut self, _: &GoToFile, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_updates();
     let path = (!self.path.as_os_str().is_empty()).then_some(self.path.as_path());
     let picker = cx.new(|cx| NearbyPicker::new(path, window, cx));
     cx.subscribe_in(&picker, window, |view, _, event: &NearbyPickerEvent, _window, cx| {
@@ -1373,6 +1382,39 @@ impl ImageView {
     .detach();
     self.nearby_picker = Some(picker);
     cx.notify();
+  }
+
+  pub(crate) fn open_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(view) = &self.updates {
+      view.update(cx, |view, cx| view.focus(window, cx));
+      return;
+    }
+    if let Some(picker) = self.theme_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    if let Some(picker) = self.font_picker.take() {
+      picker.update(cx, |picker, cx| picker.finish(window, cx));
+    }
+    self.nearby_picker = None;
+    self.export_dialog = None;
+    let view = cx.new(|cx| UpdateView::new(window, cx));
+    self.updates_subscription = Some(cx.subscribe_in(&view, window, |this, _, _: &UpdateEvent, window, cx| {
+      this.close_updates(window, cx);
+    }));
+    self.updates = Some(view);
+    cx.notify();
+  }
+
+  fn close_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.updates = None;
+    self.updates_subscription = None;
+    window.focus(&self.focus, cx);
+    cx.notify();
+  }
+
+  fn dismiss_updates(&mut self) {
+    self.updates = None;
+    self.updates_subscription = None;
   }
 
   /// The two greys of the transparency checkerboard, derived from the theme.
@@ -1748,6 +1790,7 @@ impl Render for ImageView {
       .children(self.font_picker.clone().map(IntoElement::into_any_element))
       .children(self.nearby_picker.clone().map(IntoElement::into_any_element))
       .children(self.export_dialog.clone().map(IntoElement::into_any_element))
+      .children(self.updates.clone().map(IntoElement::into_any_element))
   }
 }
 

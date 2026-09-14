@@ -93,9 +93,15 @@ pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 /// older build can read a newer file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "each flag is an independent persisted setting"
+)]
 pub struct Settings {
   /// Save documents with a path automatically after an editing pause.
   pub autosave: bool,
+  /// Check GitHub Releases for a newer package after launch.
+  pub auto_check_updates: bool,
   /// Fetch remote images and schemas from any domain without asking.
   pub allow_remote: bool,
   /// Registrable domains whose subdomains may be fetched without asking.
@@ -133,6 +139,7 @@ impl Default for Settings {
   fn default() -> Self {
     Self {
       autosave: false,
+      auto_check_updates: false,
       allow_remote: false,
       allowed_domains: default_allowed_domains(),
       theme: ThemeSettings::default(),
@@ -245,6 +252,17 @@ mod tests {
     fs::write(&path, "autosave = true\nfuture_key = 1\n").unwrap();
 
     assert!(Settings::load(&path).unwrap().autosave);
+  }
+
+  #[test]
+  fn auto_check_updates_is_off_by_default_and_reads_from_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    assert!(!Settings::default().auto_check_updates);
+
+    fs::write(&path, "auto_check_updates = true\n").unwrap();
+
+    assert!(Settings::load(&path).unwrap().auto_check_updates);
   }
 
   #[test]
