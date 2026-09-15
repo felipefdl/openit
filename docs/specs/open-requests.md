@@ -67,8 +67,8 @@ Stop and report: `interprocess` failing `cargo deny` or not building on one of t
 
 ### 3. The empty window and reopen
 
-- A fourth root view beside `DocumentView`, `ImageView`, and `PdfView`; the window helpers dispatch on it. A launch with no paths and no drafts opens one. Layout, centered in the window: `assets/brand/openit-glyph.svg` at 80 px in `ActivePalette.mark` at 0.6 opacity (already embedded), a ghost `Button` labeled "Select a file" that dispatches `OpenFile`, and one muted 12 px line under it reading "or drag and drop a file". No status bar. Title "OpenIt", no dirty marker. Everything else in the window stays quiet.
-- Filling: the first path of any open request replaces this window's root through `Window::replace_root` (the `replace_document` path), keeping the window handle; remaining paths open new windows. Cmd/Ctrl+N with clipboard content fills it the same way.
+- A fourth root view beside `DocumentView`, `ImageView`, and `PdfView`; the window helpers dispatch on it. A launch with no paths and no drafts opens one. Layout, centered in the window: `assets/brand/openit-glyph.svg` at 80 px in `ActivePalette.mark` at 0.6 opacity (already embedded), a ghost `Button` labeled "Select a file" that dispatches `OpenFile`, and one muted 12 px line under it reading "or drag and drop a file, or paste". No status bar. Title "OpenIt", no dirty marker. Everything else in the window stays quiet.
+- Filling: the first path of any open request replaces this window's root through `Window::replace_root` (the `replace_document` path), keeping the window handle; remaining paths open new windows. Cmd/Ctrl+N or Cmd/Ctrl+V with clipboard content fills it the same way.
 - `on_reopen` (behind the seam) with zero windows opens an empty window; with windows open it does nothing. Close Window closes it; it never writes a draft.
 - After: 2
 - Done when:
@@ -131,3 +131,4 @@ Stop and report: `interprocess` failing `cargo deny` or not building on one of t
 | 2026-09-11 | 6 | Updated | Windows PATH uses nsis `preinstall-section` with matching install and uninstall sections. |
 | 2026-09-11 | 6 | Shipped | NSIS preinstall-section writes the cmd shims and HKCU Environment Path. |
 | 2026-09-11 | 7 | Shipped | Architecture spec and README updated: Command line and Empty window point here, the binary is the command, and AppImage commands are symlinked by hand. |
+| 2026-09-15 | 3 | Updated | Empty-window line is "or drag and drop a file, or paste"; Cmd/Ctrl+V fills the window the same way as Cmd/Ctrl+N. |

@@ -1,6 +1,7 @@
 //! The empty window: a waiting surface that an open request fills in place.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Paste;
 use gpui_kit::component::{ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::{InteractiveElement as _, Styled as _};
 use gpui_kit::{
@@ -8,7 +9,7 @@ use gpui_kit::{
   ParentElement as _, Render, Subscription, Window, div, px, svg,
 };
 
-use crate::actions::{CloseWindow, CodeFont, ColorTheme, OpenFile, UiFont};
+use crate::actions::{CloseWindow, CodeFont, ColorTheme, NewFromClipboard, OpenFile, UiFont};
 use crate::drop::{apply_external_paths, external_paths_ring};
 use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::theme::{ActivePalette, observe_appearance};
@@ -150,6 +151,15 @@ impl EmptyView {
     window.remove_window();
   }
 
+  #[allow(clippy::unused_self, reason = "Paste listener signature")]
+  fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+    // The action listener holds the window. Defer so `empty_window` can update it.
+    cx.spawn(async move |_, cx| {
+      cx.update(|cx| cx.dispatch_action(&NewFromClipboard));
+    })
+    .detach();
+  }
+
   fn on_external_drag(&mut self, event: &DragMoveEvent<ExternalPaths>, _: &mut Window, cx: &mut Context<Self>) {
     let over = event.bounds.contains(&event.event.position);
     if self.drop_hover != over {
@@ -181,6 +191,7 @@ impl Render for EmptyView {
       .key_context("EmptyView")
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::close))
+      .on_action(cx.listener(Self::paste))
       .on_action(cx.listener(Self::open_theme_picker))
       .on_action(cx.listener(Self::open_ui_font_picker))
       .on_action(cx.listener(Self::open_code_font_picker))
@@ -227,7 +238,12 @@ impl Render for EmptyView {
               .label("Select a file")
               .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(OpenFile), cx))),
           )
-          .child(div().text_size(px(12.)).text_color(hint).child("or drag and drop a file")),
+          .child(
+            div()
+              .text_size(px(12.))
+              .text_color(hint)
+              .child("or drag and drop a file, or paste"),
+          ),
       )
       .children(self.theme_picker.clone().map(IntoElement::into_any_element))
       .children(self.font_picker.clone().map(IntoElement::into_any_element))
@@ -240,13 +256,15 @@ mod tests {
   use std::cell::Cell;
   use std::rc::Rc;
 
+  use gpui_kit::component::input::Paste;
   use gpui_kit::component::theme::Theme;
   use gpui_kit::test::TestWindowExt as _;
-  use gpui_kit::{KeyBinding, TestAppContext, WindowAppearance};
+  use gpui_kit::{ClipboardItem, KeyBinding, TestAppContext, WindowAppearance};
 
   use openit_core::settings::Settings;
 
-  use crate::actions::{CodeFont, ColorTheme, OpenFile, UiFont};
+  use crate::actions::{CodeFont, ColorTheme, NewFromClipboard, OpenFile, UiFont};
+  use crate::document_view::DocumentView;
 
   use super::EmptyView;
 
@@ -275,6 +293,48 @@ mod tests {
       window.click("select-file", cx);
     });
     assert!(dispatched.get(), "the ghost button dispatches OpenFile");
+  }
+
+  #[gpui_kit::test]
+  fn paste_dispatches_new_from_clipboard(cx: &mut TestAppContext) {
+    init_app(cx);
+    let dispatched = Rc::new(Cell::new(false));
+    cx.update({
+      let dispatched = Rc::clone(&dispatched);
+      move |cx| {
+        cx.bind_keys([KeyBinding::new("cmd-v", Paste, Some("EmptyView"))]);
+        cx.on_action(move |_: &NewFromClipboard, _| dispatched.set(true));
+      }
+    });
+    let (_view, cx) = cx.add_window_view(EmptyView::new);
+    cx.simulate_keystrokes("cmd-v");
+    cx.run_until_parked();
+    assert!(dispatched.get(), "cmd-v on the empty window dispatches NewFromClipboard");
+  }
+
+  #[gpui_kit::test]
+  fn paste_fills_the_empty_window_from_clipboard_text(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = crate::document_view::tests::install_globals(cx);
+    cx.update(|cx| {
+      cx.bind_keys([KeyBinding::new("cmd-v", Paste, Some("EmptyView"))]);
+      cx.on_action(|_: &NewFromClipboard, cx| crate::handle_new_from_clipboard(cx));
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("from the clipboard".to_owned()));
+    let (_view, cx) = cx.add_window_view(EmptyView::new);
+
+    cx.simulate_keystrokes("cmd-v");
+    cx.run_until_parked();
+
+    let handle = cx.windows().into_iter().next().expect("the empty window stays");
+    let view = handle
+      .update(cx, |_, window, _| window.root::<DocumentView>().flatten())
+      .expect("the window is still open")
+      .expect("paste replaces EmptyView with a document");
+    view.read_with(cx, |view, _| {
+      assert_eq!(view.title(), "Untitled");
+      assert!(view.is_dirty());
+    });
   }
 
   #[gpui_kit::test]

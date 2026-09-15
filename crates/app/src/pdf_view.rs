@@ -1050,11 +1050,19 @@ impl PdfView {
     self.set_current_match(Some(next), cx);
   }
 
-  fn next_match(&mut self, _: &NextMatch, _window: &mut Window, cx: &mut Context<Self>) {
+  fn next_match(&mut self, _: &NextMatch, window: &mut Window, cx: &mut Context<Self>) {
+    if self.matches.is_empty() {
+      self.open_find(&Find, window, cx);
+      return;
+    }
     self.step_match(1, cx);
   }
 
-  fn previous_match(&mut self, _: &PreviousMatch, _window: &mut Window, cx: &mut Context<Self>) {
+  fn previous_match(&mut self, _: &PreviousMatch, window: &mut Window, cx: &mut Context<Self>) {
+    if self.matches.is_empty() {
+      self.open_find(&Find, window, cx);
+      return;
+    }
     self.step_match(-1, cx);
   }
 
@@ -2412,6 +2420,59 @@ mod tests {
     });
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |view, _| view.current_match()), Some(1));
+  }
+
+  #[gpui_kit::test]
+  fn cmd_g_opens_find_when_there_are_no_matches(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-g", crate::actions::NextMatch, Some("PdfView"))]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_pdf(dir.path(), "a.pdf", 1);
+    let (view, cx) = open(cx, path);
+
+    cx.simulate_keystrokes("cmd-g");
+    cx.run_until_parked();
+    assert!(
+      view.read_with(cx, |view, _| view.find.is_some()),
+      "cmd-g with no search opens find"
+    );
+  }
+
+  #[gpui_kit::test]
+  fn cmd_g_steps_to_the_next_match(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-g", crate::actions::NextMatch, Some("PdfView"))]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("words.pdf");
+    std::fs::write(&path, tiny_pdf_pages(&["alpha beta", "gamma alpha"])).unwrap();
+    let (view, cx) = open(cx, path);
+    view.update_in(cx, |view, window, cx| view.open_find(&crate::actions::Find, window, cx));
+    view.update_in(cx, |view, window, cx| view.run_search("alpha".to_owned(), window, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |view, _| view.current_match()), Some(0));
+
+    cx.simulate_keystrokes("cmd-g");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |view, _| view.current_match()), Some(1));
+  }
+
+  #[gpui_kit::test]
+  fn option_cmd_g_opens_go_to_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("alt-cmd-g", crate::actions::GoToPage, Some("PdfView"))]));
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_pdf(dir.path(), "a.pdf", 2);
+    let (view, cx) = open(cx, path);
+
+    cx.simulate_keystrokes("alt-cmd-g");
+    cx.run_until_parked();
+    assert!(
+      view.read_with(cx, |view, _| matches!(view.prompt, Some(super::Prompt::GoToPage(_)))),
+      "option-cmd-g opens go to page"
+    );
   }
 
   #[gpui_kit::test]

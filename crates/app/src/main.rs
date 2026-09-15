@@ -460,7 +460,7 @@ fn handle_open_file(cx: &mut App) {
 /// Open what the clipboard holds: copied files open their originals, an image
 /// becomes an untitled PNG document, and text becomes an untitled text
 /// document. Nothing happens for an empty clipboard.
-fn handle_new_from_clipboard(cx: &mut App) {
+pub(crate) fn handle_new_from_clipboard(cx: &mut App) {
   let Some(item) = cx.read_from_clipboard() else {
     tracing::info!("clipboard is empty; nothing to open");
     return;
@@ -552,6 +552,8 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("ctrl-p", actions::GoToFile, None),
     KeyBinding::new("cmd-n", actions::NewFromClipboard, None),
     KeyBinding::new("ctrl-n", actions::NewFromClipboard, None),
+    KeyBinding::new("cmd-v", gpui_kit::component::input::Paste, Some("EmptyView")),
+    KeyBinding::new("ctrl-v", gpui_kit::component::input::Paste, Some("EmptyView")),
     KeyBinding::new("cmd-shift-e", actions::ToggleMode, None),
     KeyBinding::new("ctrl-shift-e", actions::ToggleMode, None),
     KeyBinding::new("cmd-k cmd-t", actions::ColorTheme, None),
@@ -591,8 +593,16 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("ctrl-1", actions::ActualSize, Some("PdfView")),
     KeyBinding::new("cmd-f", actions::Find, Some("PdfView")),
     KeyBinding::new("ctrl-f", actions::Find, Some("PdfView")),
-    KeyBinding::new("cmd-g", actions::GoToPage, Some("PdfView")),
-    KeyBinding::new("ctrl-g", actions::GoToPage, Some("PdfView")),
+    KeyBinding::new("cmd-g", actions::NextMatch, Some("PdfView")),
+    KeyBinding::new("ctrl-g", actions::NextMatch, Some("PdfView")),
+    KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("PdfView")),
+    KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("PdfView")),
+    KeyBinding::new("alt-cmd-g", actions::GoToPage, Some("PdfView")),
+    KeyBinding::new("alt-ctrl-g", actions::GoToPage, Some("PdfView")),
+    KeyBinding::new("cmd-g", actions::NextMatch, Some("PdfFindBar")),
+    KeyBinding::new("ctrl-g", actions::NextMatch, Some("PdfFindBar")),
+    KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("PdfFindBar")),
+    KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("PdfFindBar")),
     KeyBinding::new("cmd-a", actions::SelectAll, Some("PdfView")),
     KeyBinding::new("ctrl-a", actions::SelectAll, Some("PdfView")),
     KeyBinding::new("cmd-c", actions::Copy, Some("PdfView")),
