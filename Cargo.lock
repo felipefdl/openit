@@ -5585,7 +5585,7 @@ dependencies = [
 
 [[package]]
 name = "openit"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-channel",
  "cargo-packager-updater",
@@ -5609,7 +5609,7 @@ dependencies = [
 
 [[package]]
 name = "openit-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dirs 7.0.0",
  "hayro",
