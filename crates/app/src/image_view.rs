@@ -1445,7 +1445,8 @@ impl ImageView {
       actions = actions.child(toolbar_button(
         "rotate-left",
         Icon::empty().path("icons/rotate-ccw-square.svg"),
-        "Rotate Left (Cmd+L)",
+        "Rotate Left",
+        Some("secondary-l"),
         cx,
         cx.listener(|view, _, window, cx| view.rotate_left(&RotateLeft, window, cx)),
       ));
@@ -1459,6 +1460,7 @@ impl ImageView {
         self.background().label(),
         self.background().next().label()
       ),
+      None,
       cx,
       cx.listener(|view, _, window, cx| view.cycle_background(&CycleBackground, window, cx)),
     ));
@@ -1527,6 +1529,10 @@ impl ImageView {
       pan: self.pan,
       frame: self.frame_index,
     };
+    // Decoding runs in the background; until it lands, say so instead of
+    // showing an empty surface.
+    let opening = self.decoded.is_none().then(|| format!("Opening {}…", self.title()));
+    let muted = cx.theme().muted_foreground;
     div()
       .id("image-surface")
       .relative()
@@ -1562,6 +1568,19 @@ impl ImageView {
         .absolute()
         .inset_0(),
       )
+      .when_some(opening, |surface, message| {
+        surface.child(
+          div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(muted)
+            .child(message),
+        )
+      })
       .into_any_element()
   }
 

@@ -13,7 +13,7 @@ Out of scope: exact UI styling, benchmark thresholds (measured, not invented; se
 
 ## Approach
 
-OpenIt is a fresh application organized around documents. It uses gpui-kit 0.6.1 presentation primitives (`EditorState`/`Editor` for text, `TextViewState`/`TextView` for Markdown) and focused helpers where they fit (bounded image decoding, local-asset grant logic). It does not import a repository model, mandatory autosave, another application's window shell, or another product's branding, and it does not introduce a library shared with another application.
+OpenIt is a fresh application organized around documents. It uses gpui-kit 0.7.0 presentation primitives (`EditorState`/`Editor` for text, `TextViewState`/`TextView` for Markdown) and focused helpers where they fit (bounded image decoding, local-asset grant logic). It does not import a repository model, mandatory autosave, another application's window shell, or another product's branding, and it does not introduce a library shared with another application.
 
 Alternatives considered and rejected:
 
@@ -102,8 +102,9 @@ A failed save or checkpoint keeps the buffer and shows an actionable error in th
 - Other supported text formats open directly in the editor.
 - A title bar button and Cmd/Ctrl+Shift+E toggle modes and save the choice for subsequent Markdown windows and launches. Existing windows retain their own mode. The button shows the mode a click moves to: a pencil while previewing, an eye while editing.
 - Preview refreshes only when the revision changes, not on hidden-preview keystrokes.
-- Preview layout: `View > Markdown Preview Width` offers Readable (700 px, default), Wide (960 px), and Full Width. Fixed-width columns are centered and shrink to fit smaller windows; all presets retain at least 24 px side padding. Width changes apply to open previews and persist app-wide without changing editor wrapping. Body text is 16 px with 1.6 line height. Links, inline code, code blocks, and tables take their colors from the active theme palette. Tables use gpui-base's measured layout (word wrapping; a table wider than the column scrolls sideways). The `TextView` owns the scroll so it stays virtualized (a 24,000-line file opens in about 0.6 s and scrolls smoothly; the non-virtualized layout could not open it at all). Scrollbar placement and heading-color limitations are tracked in [Blocked features](../blocked-features.md).
+- Preview layout: `View > Markdown Preview Width` offers Readable (700 px, default), Wide (960 px), and Full Width. Fixed-width columns are centered and shrink to fit smaller windows; all presets retain at least 24 px side padding. Width changes apply to open previews and persist app-wide without changing editor wrapping. Body text is 16 px with 1.6 line height. Links, inline code, code blocks, and tables take their colors from the active theme palette. Tables use gpui-base's measured layout (word wrapping; a table wider than the column scrolls sideways). The `TextView` owns the scroll so it stays virtualized (a 24,000-line file opens in about 0.6 s and scrolls smoothly; the non-virtualized layout could not open it at all). Scrollbar placement limitations are tracked in [Blocked features](../blocked-features.md).
 - Text selection in the preview comes from gpui-base's window-level `TextSelectionLayer`, which the document view mounts itself (OpenIt windows do not use gpui-component's `Root`).
+- Find in the preview: `Edit > Find…` (Cmd/Ctrl+F) opens a find bar over the preview. Matching runs on the rendered text, not the Markdown source, and folds case, ligatures, diacritics, and whitespace runs the way PDF search does (`openit_core::text_find`). Every match is highlighted through gpui-base's `TextViewState` range highlights, the current one stronger, and the current one is revealed. The bar shows `X of N`; Enter and Cmd/Ctrl+G step forward, Shift for back, wrapping at both ends; Escape or Done closes it and clears the highlights. A reparse searches again. Switching to Edit closes the bar; in the editor, Find opens gpui-kit's built-in search panel and Cmd/Ctrl+G steps its matches.
 
 ### Reading position
 
@@ -133,6 +134,7 @@ Schema results are pushed through the public `DiagnosticSet` on `EditorState` as
 - `.pdf` opens in the PDF reader; a file whose bytes do not start with `%PDF-` shows the unsupported-format explanation. Files over 256 MiB are refused with the size explanation.
 - Password-protected documents prompt for the password in the window; it is held in memory for that window only and never persisted. A wrong password re-prompts; Cancel shows the explanation in place of the pages.
 - Page count and every page's size come from the document structure before any page renders, so the layout is stable from the first frame.
+- Until the document opens, the reader shows `Opening <name>…` centered in place of the pages.
 
 #### Viewing
 
@@ -183,7 +185,7 @@ Failures stay in the PDF window's status bar and open no view. A document the cl
 
 #### Quality contract
 
-Faithful for text-heavy documents (papers, manuals, reports). Tables are best-effort: ruled tables are reconstructed, unruled ones become aligned lines. Slides come through readable, not faithful. Scanned pages produce nothing; there is no OCR. Predefined CJK CMaps are read by `pdf-inspector` from a directory named by `PDF_INSPECTOR_BCMAPS_DIR`; without it, CJK text encoded through a predefined CMap (not `Identity-H`) is skipped. Distribution sets that variable to a bundled copy.
+Faithful for text-heavy documents (papers, manuals, reports). Tables are best-effort: ruled tables are reconstructed, unruled ones become aligned lines. Slides come through readable, not faithful. Scanned pages produce nothing; there is no OCR. `pdf-inspector` embeds the predefined CJK CMaps, so CJK text encoded through a predefined CMap converts with nothing bundled or configured.
 
 ### Images
 
@@ -198,6 +200,7 @@ Faithful for text-heavy documents (papers, manuals, reports). Tables are best-ef
 - Open fitted to the window. Zoom in and out (Cmd/Ctrl+Plus, Cmd/Ctrl+Minus, scroll wheel with Cmd/Ctrl, pinch), fit (Cmd/Ctrl+0), actual size (Cmd/Ctrl+1), pan by dragging when the image exceeds the viewport.
 - Dimensions and format come from the original file header, not the decoded texture. The status bar shows `W x H · FORMAT · size`, the frame count for animations, and the zoom percentage on the right.
 - Decoding runs off the UI thread under the existing byte and pixel limits. The texture is capped at 4096 px on the longest edge; larger images are downsampled for display and actual size is exact only up to that cap. The original dimensions are still reported from the header.
+- Until the first decode lands, the viewer shows `Opening <name>…` centered in place of the image.
 - Background: white, black, or checkerboard. Default: checkerboard when the image has an alpha channel or is an SVG, otherwise the theme background. The choice is per window and not persisted. The checkerboard is painted in screen space (8 px cells in two theme-derived greys) so it stays sharp at every zoom. A swatch icon in the title bar cycles it; `View > Image Background` holds the same states as radios.
 - Panning stops at the image: one that fits the window stays centered, and a larger one stops when its edge reaches the window edge.
 
@@ -286,7 +289,7 @@ One resolver in the document library decides every document resource: local path
 
 ### Decision order
 
-Local file, then cache, then allowlist. Anything else shows the nonblocking permission bar with two choices: allow this domain family (persisted), or always allow remote content (setting). Denied resources are never fetched or cached. Multiple resources from one family collapse into one prompt.
+Local file, then cache, then allowlist. Anything else shows the nonblocking permission bar with three choices: allow this domain family (persisted; it covers the family's subdomains), Not now (the document stops asking for the pending families and keeps their placeholders; nothing is saved), or Always allow…, which asks once more in the bar before setting `allow_remote`. Denied resources are never fetched or cached. Multiple resources from one family collapse into one prompt.
 
 ### Markdown images
 
@@ -320,13 +323,13 @@ The title bar file name and Cmd/Ctrl+P open a fuzzy picker over the open documen
 
 ### Chrome
 
-One title bar drawn by the application beside the traffic lights (gpui-component `TitleBar`, transparent system title bar): file name with the dirty marker, then the content actions on the right as bare icons (mode toggle for Markdown, rotate left and background cycle for images, PDF and Markdown views for PDFs). Clicks on those icons stop there, so the bar's own double-click does not zoom the window. The theme picker is reached from the View menu and Cmd/Ctrl+K Cmd/Ctrl+T, not from an icon. The icons carry no frame at rest; a rounded fill appears on hover and deepens while pressed, and each one shows a tooltip naming what a click does with its shortcut. The tooltips are mounted by the window, because gpui-component routes its own through the `Root` OpenIt does not use. The bar is filled flat with the theme's title bar color, overriding the toolkit's default gradient, so it reads the same in every theme. No second toolbar row. Menus and shortcuts hold everything else.
+One title bar drawn by the application beside the traffic lights (gpui-component `TitleBar`, transparent system title bar): file name with the dirty marker, then the content actions on the right as bare icons (mode toggle for Markdown, rotate left and background cycle for images, PDF and Markdown views for PDFs). Clicks on those icons stop there, so the bar's own double-click does not zoom the window. The theme picker is reached from the View menu and Cmd/Ctrl+K Cmd/Ctrl+T, not from an icon. The icons carry no frame at rest; a rounded fill appears on hover and deepens while pressed, and each one shows a tooltip naming what a click does with its shortcut, drawn the platform's way (`⇧⌘E` on macOS, `Ctrl+Shift+E` elsewhere). The file name's tooltip names Go to File and its shortcut. The tooltips are mounted by the window, because gpui-component routes its own through the `Root` OpenIt does not use. The bar is filled flat with the theme's title bar color, overriding the toolkit's default gradient, so it reads the same in every theme. No second toolbar row. Menus and shortcuts hold everything else.
 
 The status bar shows metadata on the left and the file type on the right. For text: line/column while editing (click opens the go-to-line prompt: `line[:column]`, prefilled with the current position, showing "Current Line: X of N"), absent in preview, which has no caret and the language name (click opens the language palette listing every compiled-in grammar; the pick changes highlighting for the session and decides whether the document offers Markdown preview). JSON-family documents show the schema name, or "No schema", muted left of the language name; a click opens the picker. Never a count, never danger or warning color. Images show dimensions, format, file size, and frame count on the left and the zoom percentage on the right. PDFs show `Page X of N` on the left (click opens the go-to-page prompt), indexing and generation progress beside it, and the zoom percentage on the right; a PDF window showing its generated Markdown shows that document's own readouts instead.
 
 The bar floats over the text while editing, where a translucent strip reads well against a scrolling buffer. In every other view it takes its own opaque row, so an image, a page, or a rendered document is never covered by it. Markdown preview hides the status bar and editing shows it. `View > Always Show Status Bar` (`always_show_status_bar`, default `false`) pins it visible in both. A source warning, a save error, or a settings error shows it regardless of mode or setting.
 
-Native menus: `OpenIt` (Install Command Line Tools... (macOS), Check for Updates..., Quit), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for PDFs), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Option+Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). The binary is named `OpenIt` so the platform shows that name in the application menu.
+Native menus: `OpenIt` (Install Command Line Tools... (macOS), Check for Updates..., Quit Cmd/Ctrl+Q), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for text, Markdown preview, and PDFs), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Option+Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). On macOS an item the focused window cannot act on is disabled. The binary is named `OpenIt` so the platform shows that name in the application menu.
 
 ### Settings
 
@@ -378,8 +381,8 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 
 ## References
 
-- gpui-component `EditorState`: https://docs.rs/gpui-component/0.6.1/gpui_component/input/type.EditorState.html
-- gpui-component `TextViewState`: https://docs.rs/gpui-component/0.6.1/gpui_component/text/struct.TextViewState.html
+- gpui-component `EditorState`: https://docs.rs/gpui-component/0.7.0/gpui_component/input/type.EditorState.html
+- gpui-component `TextViewState`: https://docs.rs/gpui-component/0.7.0/gpui_component/text/struct.TextViewState.html
 - hayro: https://docs.rs/hayro/latest/hayro/
 - hayro-syntax `Page`: https://docs.rs/hayro-syntax/latest/hayro_syntax/page/struct.Page.html
 - pdf-inspector Rust API: https://github.com/firecrawl/pdf-inspector/blob/main/docs/rust-api.md
@@ -417,3 +420,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-09-12: Font selector: UI Font and Code Font persist across color-theme switches; View > Font, Cmd/Ctrl+K Cmd/Ctrl+U, and Cmd/Ctrl+K Cmd/Ctrl+C open the pickers. Details in [Font selector](font-selector.md).
 - 2026-09-14: Updates: `OpenIt > Check for Updates...` opens a modal that checks GitHub Releases; `auto_check_updates` is opt-in and does not run on launch until enabled. Publish writes `latest.json`.
 - 2026-09-15: PDF Cmd/Ctrl+G is Find Next (Shift for previous); Go to Page moves to Option+Cmd/Ctrl+G. Cmd/Ctrl+V on the empty window opens the clipboard the same way as New from Clipboard. The empty-window line reads "or drag and drop a file, or paste".
+- 2026-10-04: gpui-kit 0.7.0, hayro 0.8, and current dependencies. Find in the Markdown preview (folded, highlighted, revealed) and Edit > Find reaching the editor's search; permission bar adds Not now and confirms Always allow; PDF and image windows say `Opening <name>…` until content lands; Ctrl+Q quits; tooltips draw shortcuts the platform's way. Markdown heading colors and predefined CJK CMaps are no longer blocked upstream. Fixed: a settings change (a mode toggle, theme, or width) while a Markdown image was loading or waiting for permission aborted the app; the image cache now notifies the view that owns it instead of asking the window mid-event.

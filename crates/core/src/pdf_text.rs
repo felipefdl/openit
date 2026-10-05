@@ -8,11 +8,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use pdf_inspector::types::ItemType;
-use unicode_normalization::UnicodeNormalization as _;
-use unicode_normalization::char::is_combining_mark;
 
 use crate::error::Error;
 use crate::pdf::RectPt;
+use crate::text_find::fold;
 
 /// One run of text with its box.
 #[derive(Debug, Clone, PartialEq)]
@@ -236,32 +235,6 @@ fn group_lines(mut runs: Vec<TextRun>) -> Vec<TextLine> {
     line.runs.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
   }
   lines
-}
-
-/// Fold `text` for matching.
-///
-/// NFKD splits ligatures, combining marks drop out, everything lowercases, and
-/// whitespace runs collapse to one space. Every folded character carries the
-/// index of the source character it came from.
-#[must_use]
-pub fn fold(text: &str) -> Vec<(char, usize)> {
-  let mut out: Vec<(char, usize)> = Vec::with_capacity(text.len());
-  for (index, source) in text.chars().enumerate() {
-    if source.is_whitespace() {
-      if out.last().is_none_or(|(last, _)| *last != ' ') {
-        out.push((' ', index));
-      }
-      continue;
-    }
-    for decomposed in source.nfkd() {
-      if is_combining_mark(decomposed) {
-        continue;
-      }
-      let lowered = decomposed.to_lowercase().next().unwrap_or(decomposed);
-      out.push((lowered, index));
-    }
-  }
-  out
 }
 
 /// Folded characters of one page and the source position of each.
@@ -654,11 +627,12 @@ fn round_to_usize(value: f32) -> usize {
 #[cfg(test)]
 mod tests {
   use super::{
-    Match, PageText, TextLayer, TextLine, TextPos, TextRun, after, context_for, document_range, fold, page_haystack,
+    Match, PageText, TextLayer, TextLine, TextPos, TextRun, after, context_for, document_range, page_haystack,
     position_at, rects_between, search, text_between, text_layer, word_at,
   };
   use crate::pdf::RectPt;
   use crate::pdf::test_support::tiny_pdf_pages;
+  use crate::text_find::fold;
 
   /// Build a layer from `(text, x, baseline)` triples: six points per
   /// character, twelve points tall.
@@ -692,21 +666,6 @@ mod tests {
         .collect(),
       ..TextLayer::default()
     }
-  }
-
-  #[test]
-  fn fold_splits_ligatures_drops_accents_and_lowercases() {
-    let folded: String = fold("Confi\u{FB01}guração").iter().map(|(ch, _)| *ch).collect();
-    assert_eq!(folded, "confifiguracao");
-
-    let mapped: Vec<usize> = fold("\u{FB01}x").iter().map(|(_, index)| *index).collect();
-    assert_eq!(mapped, vec![0, 0, 1], "both halves of the ligature point at one source char");
-  }
-
-  #[test]
-  fn fold_collapses_whitespace() {
-    let folded: String = fold("a \t\n b").iter().map(|(ch, _)| *ch).collect();
-    assert_eq!(folded, "a b");
   }
 
   #[test]

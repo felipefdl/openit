@@ -10,6 +10,7 @@ mod drop;
 mod empty_view;
 mod export_dialog;
 mod fetch;
+mod find_bar;
 mod font_picker;
 mod handoff;
 mod image_cache;
@@ -18,7 +19,6 @@ mod image_view;
 mod menus;
 mod nearby_picker;
 mod open_urls;
-mod pdf_find;
 mod pdf_prompts;
 mod pdf_view;
 mod schema_cache;
@@ -565,6 +565,7 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("cmd-w", actions::CloseWindow, None),
     KeyBinding::new("ctrl-w", actions::CloseWindow, None),
     KeyBinding::new("cmd-q", actions::Quit, None),
+    KeyBinding::new("ctrl-q", actions::Quit, None),
     KeyBinding::new("cmd-=", actions::ZoomIn, Some("ImageView")),
     KeyBinding::new("ctrl-=", actions::ZoomIn, Some("ImageView")),
     KeyBinding::new("cmd--", actions::ZoomOut, Some("ImageView")),
@@ -597,12 +598,18 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("ctrl-g", actions::NextMatch, Some("PdfView")),
     KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("PdfView")),
     KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("PdfView")),
+    KeyBinding::new("cmd-f", actions::Find, Some("DocumentView")),
+    KeyBinding::new("ctrl-f", actions::Find, Some("DocumentView")),
+    KeyBinding::new("cmd-g", actions::NextMatch, Some("DocumentView")),
+    KeyBinding::new("ctrl-g", actions::NextMatch, Some("DocumentView")),
+    KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("DocumentView")),
+    KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("DocumentView")),
     KeyBinding::new("alt-cmd-g", actions::GoToPage, Some("PdfView")),
     KeyBinding::new("alt-ctrl-g", actions::GoToPage, Some("PdfView")),
-    KeyBinding::new("cmd-g", actions::NextMatch, Some("PdfFindBar")),
-    KeyBinding::new("ctrl-g", actions::NextMatch, Some("PdfFindBar")),
-    KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("PdfFindBar")),
-    KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("PdfFindBar")),
+    KeyBinding::new("cmd-g", actions::NextMatch, Some("FindBar")),
+    KeyBinding::new("ctrl-g", actions::NextMatch, Some("FindBar")),
+    KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("FindBar")),
+    KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("FindBar")),
     KeyBinding::new("cmd-a", actions::SelectAll, Some("PdfView")),
     KeyBinding::new("ctrl-a", actions::SelectAll, Some("PdfView")),
     KeyBinding::new("cmd-c", actions::Copy, Some("PdfView")),
@@ -615,8 +622,8 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("pagedown", actions::PageDown, Some("PdfView")),
     KeyBinding::new("home", actions::FirstPage, Some("PdfView")),
     KeyBinding::new("end", actions::LastPage, Some("PdfView")),
-    KeyBinding::new("enter", actions::NextMatch, Some("PdfFindBar")),
-    KeyBinding::new("shift-enter", actions::PreviousMatch, Some("PdfFindBar")),
+    KeyBinding::new("enter", actions::NextMatch, Some("FindBar")),
+    KeyBinding::new("shift-enter", actions::PreviousMatch, Some("FindBar")),
   ]);
 }
 

@@ -1,4 +1,4 @@
-//! The PDF find bar: a query field, a match count, and the results list.
+//! The find bar: a query field, a match count, and, for PDFs, the results list.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -29,10 +29,12 @@ pub enum FindBarEvent {
   Close,
 }
 
-/// The bar over the pages: query, count, and one row per match.
+/// The bar over the document: query, count, and one row per PDF match.
 pub struct FindBar {
   input: Entity<InputState>,
+  /// Rows of the results list. Only the PDF reader fills it.
   matches: Arc<[Match]>,
+  total: usize,
   current: Option<usize>,
   query_task: Option<Task<()>>,
   _subscription: Subscription,
@@ -59,6 +61,7 @@ impl FindBar {
     Self {
       input,
       matches: Arc::from([]),
+      total: 0,
       current: None,
       query_task: None,
       _subscription: subscription,
@@ -75,9 +78,17 @@ impl FindBar {
     self.input.read(cx).value().to_string()
   }
 
-  /// Replace the results and the current match.
+  /// Replace the results list and the current match.
   pub fn set_results(&mut self, matches: Arc<[Match]>, current: Option<usize>, cx: &mut Context<Self>) {
+    self.total = matches.len();
     self.matches = matches;
+    self.current = current;
+    cx.notify();
+  }
+
+  /// Replace the match count and the current match, with no results list.
+  pub fn set_count(&mut self, total: usize, current: Option<usize>, cx: &mut Context<Self>) {
+    self.total = total;
     self.current = current;
     cx.notify();
   }
@@ -100,7 +111,7 @@ impl Render for FindBar {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let palette = cx.global::<ActivePalette>().0;
     let query = self.input.read(cx).value().to_string();
-    let label: SharedString = count_label(self.matches.len(), self.current, query.trim().is_empty()).into();
+    let label: SharedString = count_label(self.total, self.current, query.trim().is_empty()).into();
     let input = Input::new(&self.input).bordered(false);
     let border = hsla(palette.border);
     let muted = hsla(palette.muted_foreground);
@@ -111,7 +122,7 @@ impl Render for FindBar {
       .map(|(index, hit)| {
         let selected = current == Some(index);
         div()
-          .id(("pdf-find-row", index))
+          .id(("find-row", index))
           .flex()
           .items_baseline()
           .gap_2()
@@ -140,12 +151,8 @@ impl Render for FindBar {
       })
       .collect();
     div()
-      .key_context("PdfFindBar")
+      .key_context("FindBar")
       .occlude()
-      .absolute()
-      .top_0()
-      .left_0()
-      .right_0()
       .flex()
       .flex_col()
       .bg(hsla(palette.sidebar))
@@ -163,7 +170,7 @@ impl Render for FindBar {
           .child(div().flex_shrink_0().text_size(px(13.)).text_color(muted).child(label))
           .child(
             div()
-              .id("pdf-find-close")
+              .id("find-close")
               .flex_shrink_0()
               .px_2()
               .rounded_sm()
@@ -178,7 +185,7 @@ impl Render for FindBar {
       .when(!rows.is_empty(), |bar| {
         bar.child(
           div()
-            .id("pdf-find-results")
+            .id("find-results")
             .flex()
             .flex_col()
             .max_h(px(28. * row_count(rows.len())))

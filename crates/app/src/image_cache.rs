@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use futures::{FutureExt as _, future::Shared};
 use gpui_kit::{
-  App, AppContext, Context, Entity, ImageCache, ImageCacheError, RenderImage, Resource, Task, Window, hash,
+  App, AppContext, Context, Entity, EntityId, ImageCache, ImageCacheError, RenderImage, Resource, Task, Window, hash,
 };
 use image::{Frame, Rgba, RgbaImage};
 use openit_core::cache::MAX_RESOURCE_BYTES;
@@ -41,6 +41,9 @@ pub struct PermissionRequest {
 pub struct PermissionRequests {
   /// Families currently waiting for an answer.
   pub(crate) pending: Vec<PermissionRequest>,
+  /// Families the reader set aside with "Not now". This document stops asking
+  /// for them; their resources keep their placeholders.
+  declined: Vec<DomainFamily>,
   answers: Vec<PermissionAnswer>,
 }
 
@@ -51,7 +54,11 @@ pub(crate) enum PermissionAnswer {
 
 impl PermissionRequests {
   /// Add a resource to the prompt for its family, collapsing duplicate families.
+  /// A family declined for this document is not asked again.
   pub fn ask(&mut self, family: DomainFamily, resource: Resource, cx: &mut Context<Self>) {
+    if self.declined.contains(&family) {
+      return;
+    }
     if let Some(request) = self.pending.iter_mut().find(|request| request.family == family) {
       if !request.waiting.iter().any(|waiting| waiting == &resource) {
         request.waiting.push(resource);
@@ -94,6 +101,15 @@ impl PermissionRequests {
     cx.notify();
   }
 
+  /// Set every pending family aside for this document without granting it.
+  pub(crate) fn decline_all(&mut self, cx: &mut Context<Self>) {
+    if self.pending.is_empty() {
+      return;
+    }
+    self.declined.extend(self.pending.drain(..).map(|request| request.family));
+    cx.notify();
+  }
+
   pub(crate) fn take_answers(&mut self) -> Vec<PermissionAnswer> {
     std::mem::take(&mut self.answers)
   }
@@ -132,6 +148,10 @@ pub struct DocumentImageCache {
   pub(crate) base_dir: Option<PathBuf>,
   pub(crate) entries: HashMap<u64, Entry>,
   pub(crate) requests: Entity<PermissionRequests>,
+  /// The view that draws these images, notified when a load lands. Retries
+  /// run from settings and permission observers outside paint, where
+  /// `Window::current_view` panics, so the cache is told its owner up front.
+  owner: EntityId,
   resources: HashMap<u64, Resource>,
   notifications: HashMap<u64, Task<()>>,
   placeholder: Option<Arc<RenderImage>>,
@@ -139,16 +159,18 @@ pub struct DocumentImageCache {
   ready: ReadyBudget,
 }
 impl DocumentImageCache {
-  /// Create a cache for a document base directory.
+  /// Create a cache for a document base directory, drawn by `owner`.
   pub fn new<C: AppContext>(
     base_dir: Option<PathBuf>,
     requests: Entity<PermissionRequests>,
+    owner: EntityId,
     cx: &mut C,
   ) -> Entity<Self> {
     cx.new(|_| Self {
       base_dir,
       entries: HashMap::new(),
       requests,
+      owner,
       resources: HashMap::new(),
       notifications: HashMap::new(),
       placeholder: None,
@@ -394,10 +416,7 @@ impl DocumentImageCache {
     cx: &App,
   ) {
     self.entries.insert(resource_hash, Entry::Loading(task.clone()));
-    #[cfg(not(test))]
-    let entity = window.current_view();
-    #[cfg(test)]
-    let entity = self.requests.entity_id();
+    let entity = self.owner;
     let notification = window.spawn(cx, async move |cx| {
       let _ = task.await;
       cx.on_next_frame(move |_, cx| cx.notify(entity));

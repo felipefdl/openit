@@ -24,6 +24,7 @@ pub mod schema;
 pub mod select;
 pub mod session;
 pub mod settings;
+pub mod text_find;
 pub mod theme;
 pub mod watch;
 

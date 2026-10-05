@@ -70,6 +70,8 @@ When a remote image or schema needs permission, show a nonblocking bar rather th
 - Allow the resource's domain family and persist that entry in the allowlist. A stored domain covers itself and its subdomains, rather than one exact origin.
 - Always allow remote content across the application, until the user disables that setting.
 
+"Not now" sets the request aside for that document without granting anything.
+
 Allowlisting grants network access; it does not establish that hosted content is safe. The exact starter entries and domain-family matching rules belong in the security and resource-loading specs.
 
 ## Platform and reuse commitments

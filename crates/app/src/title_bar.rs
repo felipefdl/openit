@@ -6,12 +6,27 @@
 //! itself shows.
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 use gpui_kit::prelude::{InteractiveElement as _, StatefulInteractiveElement as _};
 use gpui_kit::{
-  App, ClickEvent, FontWeight, IntoElement, MouseButton, ParentElement as _, SharedString, Styled as _, Window, div,
+  AnyView, App, ClickEvent, FontWeight, IntoElement, Keystroke, MouseButton, ParentElement as _, SharedString,
+  Styled as _, Window, div,
 };
+
+/// A tooltip naming what a click does, with its shortcut drawn the platform's
+/// way (`⇧⌘E` on macOS, `Ctrl+Shift+E` elsewhere). `shortcut` uses GPUI
+/// keystroke syntax, where `secondary` is Cmd on macOS and Ctrl elsewhere.
+pub(crate) fn tooltip(
+  text: SharedString,
+  shortcut: Option<&'static str>,
+  window: &mut Window,
+  cx: &mut App,
+) -> AnyView {
+  let key = shortcut.and_then(|keys| Keystroke::parse(keys).ok()).map(Kbd::new);
+  Tooltip::new(text).key_binding(key).build(window, cx)
+}
 
 /// One bare icon in the title bar: no frame at rest, a rounded fill on hover
 /// that deepens while pressed, and a tooltip naming what a click does.
@@ -19,6 +34,7 @@ pub(crate) fn toolbar_button(
   id: &'static str,
   icon: Icon,
   tip: impl Into<SharedString>,
+  shortcut: Option<&'static str>,
   cx: &App,
   on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -32,7 +48,7 @@ pub(crate) fn toolbar_button(
   div()
     .id(id)
     .flex()
-    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+    .tooltip(move |window, cx| tooltip(tip.clone(), shortcut, window, cx))
     .on_click(on_click)
     .child(
       Button::new(SharedString::new_static(id))
@@ -44,7 +60,7 @@ pub(crate) fn toolbar_button(
 }
 
 /// The document name in the title bar, with a dirty marker and a chevron.
-/// Hover uses the same fill as [`toolbar_button`].
+/// Hover uses the same fill as [`toolbar_button`]; a click lists nearby files.
 pub(crate) fn file_name(
   title: impl Into<SharedString>,
   dirty: bool,
@@ -71,6 +87,7 @@ pub(crate) fn file_name(
       .active(move |style| style.bg(pressed))
       .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
       .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+      .tooltip(|window, cx| tooltip("Go to File".into(), Some("secondary-p"), window, cx))
       .on_click(on_click)
       .child(
         div()

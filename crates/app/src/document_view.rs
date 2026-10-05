@@ -1,5 +1,8 @@
-use crate::actions::{CloseWindow, CodeFont, ColorTheme, GoToFile, Save, ToggleMode, UiFont};
+use crate::actions::{
+  CloseWindow, CodeFont, ColorTheme, Find, GoToFile, NextMatch, PreviousMatch, Save, ToggleMode, UiFont,
+};
 use crate::drop::{apply_external_paths, external_paths_ring};
+use crate::find_bar::{FindBar, FindBarEvent};
 use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::image_cache::{DocumentImageCache, PermissionAnswer, PermissionRequests};
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
@@ -13,16 +16,18 @@ use crate::status_pickers::{
 };
 use crate::theme::{ActivePalette, hsla, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
-use crate::title_bar::{file_name, toolbar_button};
+use crate::title_bar::{file_name, toolbar_button, tooltip};
 use crate::updater::dialog::{UpdateEvent, UpdateView};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, RopeExt, TabSize};
-use gpui_kit::component::text::{SelectionFormat, TextView, TextViewState, TextViewStyle};
+use gpui_kit::component::text::{
+  RangeHighlight, RenderedText, SelectionFormat, TextView, TextViewState, TextViewStyle,
+};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, TitleBar};
 use gpui_kit::prelude::{FluentBuilder, InteractiveElement, StatefulInteractiveElement};
 use gpui_kit::{
   AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, IntoElement, MouseButton,
-  ParentElement, PathPromptOptions, PromptLevel, Render, Styled, Subscription, Task, Window, div,
+  ParentElement, PathPromptOptions, PromptLevel, Render, SharedString, Styled, Subscription, Task, Window, div,
 };
 use openit_core::document::{Loaded, Revision, Snapshot};
 use openit_core::kind::DocumentKind;
@@ -32,13 +37,23 @@ use openit_core::schema::{self, JsonFamily};
 use openit_core::select::SchemaSelection;
 use openit_core::session::SessionId;
 use openit_core::settings::{MarkdownMode, MarkdownPreviewWidth};
+use openit_core::text_find;
 use openit_core::watch::Fingerprint;
 use ropey::Rope;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
   Preview,
   Edit,
+}
+/// What the permission bar asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionPrompt {
+  /// Allow the pending family, set the families aside, or always allow.
+  Families,
+  /// Confirm turning remote content on for every document.
+  ConfirmAlways,
 }
 const MIN_PREVIEW_SIDE_PADDING: f32 = 24.;
 const READABLE_PREVIEW_WIDTH: f32 = 700.;
@@ -157,6 +172,17 @@ pub struct DocumentView {
   pub(crate) requests: Entity<PermissionRequests>,
   overlay: Option<Overlay>,
   overlay_subscription: Option<Subscription>,
+  /// The preview's find bar. Edit mode uses the editor's own search instead.
+  find: Option<Entity<FindBar>>,
+  find_subscription: Option<Subscription>,
+  find_query: String,
+  /// Matches as ranges of the preview's rendered text.
+  find_matches: Vec<Range<usize>>,
+  find_current: Option<usize>,
+  /// The rendered text last searched, so a reparse searches again.
+  find_searched: Option<RenderedText>,
+  /// What the permission bar is asking.
+  permission_prompt: PermissionPrompt,
   /// Highlighting language chosen from the status bar, over the detected one.
   language_override: Option<&'static str>,
   /// Whether another view draws this window's title bar and close guard.
@@ -172,7 +198,7 @@ impl DocumentView {
     let schema_pick = schema_pick_from_settings(&path, cx);
     let session = DocumentSession::new(path, kind, session, window.window_handle(), disk);
     let requests = cx.new(|_| PermissionRequests::default());
-    let image_cache = DocumentImageCache::new(session.base_dir(), requests.clone(), cx);
+    let image_cache = DocumentImageCache::new(session.base_dir(), requests.clone(), cx.entity_id(), cx);
     DocumentImageCache::observe_release(&image_cache, &*cx);
     let schema_cache = DocumentSchemaCache::new(requests.clone(), cx);
     let mut view = Self {
@@ -208,12 +234,22 @@ impl DocumentView {
       requests: requests.clone(),
       overlay: None,
       overlay_subscription: None,
+      find: None,
+      find_subscription: None,
+      find_query: String::new(),
+      find_matches: Vec::new(),
+      find_current: None,
+      find_searched: None,
+      permission_prompt: PermissionPrompt::Families,
       language_override: None,
       embedded: false,
     };
     view.requests_observation = Some(cx.observe_in(&requests, window, |this, requests, window, cx| {
       let answers = requests.update(cx, |requests, _| requests.take_answers());
       this.pending_answers.extend(answers);
+      if requests.read(cx).is_empty() {
+        this.permission_prompt = PermissionPrompt::Families;
+      }
       this.schema_cache.update(cx, |cache, cx| cache.pump(window, cx));
       if this.schema_waiting {
         this.start_schema_validation(window, cx);
@@ -887,6 +923,9 @@ impl DocumentView {
         Mode::Preview
       },
     };
+    if mode == Mode::Edit {
+      self.dismiss_find(cx);
+    }
     self.mode = mode;
     let markdown_mode = match mode {
       Mode::Preview => MarkdownMode::Preview,
@@ -895,12 +934,165 @@ impl DocumentView {
     SettingsStore::update(&mut *cx, |settings| settings.markdown_mode = markdown_mode);
     cx.notify();
   }
+  /// Find in the document. Edit mode opens the editor's own search panel; the
+  /// preview gets the find bar.
+  fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+    if self.mode == Mode::Edit {
+      let editor = self.ensure_editor(window, cx);
+      editor.update(cx, |state, cx| {
+        state.focus(window, cx);
+        state.open_search(false, cx);
+      });
+      return;
+    }
+    if let Some(find) = &self.find {
+      find.update(cx, |find, cx| find.focus(window, cx));
+      return;
+    }
+    let bar = cx.new(|cx| FindBar::new(window, cx));
+    self.find_subscription =
+      Some(
+        cx.subscribe_in(&bar, window, |view, _, event: &FindBarEvent, window, cx| match event {
+          FindBarEvent::QueryChanged(query) => {
+            view.find_query.clone_from(query);
+            view.run_find(cx);
+          },
+          FindBarEvent::Pick(index) => view.set_find_current(Some(*index), cx),
+          FindBarEvent::Close => view.close_find(window, cx),
+        }),
+      );
+    self.find = Some(bar);
+    cx.notify();
+  }
+
+  fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.dismiss_find(cx);
+    window.focus(&self.focus, cx);
+    cx.notify();
+  }
+
+  /// Drop the find bar, its matches, and their highlights.
+  fn dismiss_find(&mut self, cx: &mut Context<Self>) {
+    self.find = None;
+    self.find_subscription = None;
+    self.find_query.clear();
+    self.find_matches.clear();
+    self.find_current = None;
+    self.find_searched = None;
+    if let Some(preview) = &self.preview {
+      preview.update(cx, TextViewState::clear_range_highlights);
+    }
+  }
+
+  /// Search the preview's rendered text for the query and highlight every match.
+  fn run_find(&mut self, cx: &mut Context<Self>) {
+    let Some(preview) = self.preview.clone() else {
+      return;
+    };
+    let text = preview.read(cx).rendered_text();
+    self.find_matches = text_find::find(text.as_str(), &self.find_query);
+    self.find_searched = Some(text);
+    let first = (!self.find_matches.is_empty()).then_some(0);
+    self.set_find_current(first, cx);
+  }
+
+  /// Make `index` the current match: paint it stronger, scroll to it, and
+  /// update the count.
+  fn set_find_current(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+    self.find_current = index.filter(|index| *index < self.find_matches.len());
+    if let Some(preview) = self.preview.clone() {
+      let warning = hsla(cx.global::<ActivePalette>().0.warning);
+      let current = self.find_current;
+      let highlights: Vec<RangeHighlight> = self
+        .find_matches
+        .iter()
+        .enumerate()
+        .map(|(index, range)| {
+          let opacity = if current == Some(index) { 0.55 } else { 0.22 };
+          RangeHighlight::new(range.clone(), warning.opacity(opacity))
+        })
+        .collect();
+      let reveal = current.and_then(|index| self.find_matches.get(index)).cloned();
+      preview.update(cx, |state, cx| {
+        if let Err(error) = state.set_range_highlights(highlights, cx) {
+          tracing::warn!(?error, "preview find highlights rejected");
+        }
+        if let Some(range) = reveal
+          && let Err(error) = state.reveal_range(range, cx)
+        {
+          tracing::warn!(?error, "preview find reveal rejected");
+        }
+      });
+    }
+    if let Some(find) = self.find.clone() {
+      let total = self.find_matches.len();
+      let current = self.find_current;
+      find.update(cx, |find, cx| find.set_count(total, current, cx));
+    }
+    cx.notify();
+  }
+
+  fn next_match(&mut self, _: &NextMatch, window: &mut Window, cx: &mut Context<Self>) {
+    self.step_find(true, window, cx);
+  }
+
+  fn previous_match(&mut self, _: &PreviousMatch, window: &mut Window, cx: &mut Context<Self>) {
+    self.step_find(false, window, cx);
+  }
+
+  /// Move to the next or previous match, wrapping at both ends. With nothing
+  /// to step through, open the search instead.
+  fn step_find(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    if self.mode == Mode::Edit {
+      let editor = self.ensure_editor(window, cx);
+      editor.update(cx, |state, cx| {
+        if !state.search_session().is_active() {
+          state.open_search(false, cx);
+        } else if forward {
+          state.next_search_match(cx);
+        } else {
+          state.previous_search_match(cx);
+        }
+      });
+      return;
+    }
+    let total = self.find_matches.len();
+    if total == 0 {
+      self.open_find(&Find, window, cx);
+      return;
+    }
+    let current = self.find_current.unwrap_or(0);
+    let next = if forward {
+      current.saturating_add(1) % total
+    } else if current == 0 {
+      total.saturating_sub(1)
+    } else {
+      current.saturating_sub(1)
+    };
+    self.set_find_current(Some(next), cx);
+  }
+
   fn answer_family(&self, family: DomainFamily, cx: &mut Context<Self>) {
     self.requests.update(cx, |requests, cx| requests.answer_allow(family, cx));
   }
 
-  fn answer_always(&self, cx: &mut Context<Self>) {
+  fn answer_always(&mut self, cx: &mut Context<Self>) {
+    self.permission_prompt = PermissionPrompt::Families;
     self.requests.update(cx, PermissionRequests::answer_always);
+  }
+
+  /// "Not now": stop asking for the pending families in this document. Their
+  /// resources keep their placeholders and nothing is saved.
+  fn decline_families(&mut self, cx: &mut Context<Self>) {
+    self.permission_prompt = PermissionPrompt::Families;
+    self.requests.update(cx, PermissionRequests::decline_all);
+  }
+
+  /// Switch the permission bar between the family prompt and the "Always
+  /// allow" confirmation.
+  fn set_permission_prompt(&mut self, prompt: PermissionPrompt, cx: &mut Context<Self>) {
+    self.permission_prompt = prompt;
+    cx.notify();
   }
   fn apply_permission_answer(&mut self, answer: PermissionAnswer, window: &Window, cx: &mut Context<Self>) {
     match answer {
@@ -942,7 +1134,14 @@ impl DocumentView {
       None => cx.new(|cx| TextViewState::markdown(&source, cx)),
     };
     if self.preview_observation.is_none() {
-      self.preview_observation = Some(cx.observe(&preview, |_, _, cx| cx.notify()));
+      // A reparse changes the rendered text, so an open find searches again.
+      // Setting highlights notifies too, but leaves the text equal.
+      self.preview_observation = Some(cx.observe(&preview, |this, preview, cx| {
+        if this.find.is_some() && this.find_searched.as_ref() != Some(&preview.read(cx).rendered_text()) {
+          this.run_find(cx);
+        }
+        cx.notify();
+      }));
     }
     self.preview = Some(preview.clone());
     self.preview_revision = Some(snapshot.revision);
@@ -1062,13 +1261,14 @@ impl DocumentView {
     if self.is_markdown() {
       // The button carries the mode a click moves to: a pen to write, an eye to read.
       let (icon, tip) = match self.mode {
-        Mode::Preview => (Icon::empty().path("icons/pencil.svg"), "Edit (Cmd+Shift+E)"),
-        Mode::Edit => (Icon::new(IconName::Eye), "Preview (Cmd+Shift+E)"),
+        Mode::Preview => (Icon::empty().path("icons/pencil.svg"), "Edit"),
+        Mode::Edit => (Icon::new(IconName::Eye), "Preview"),
       };
       actions = actions.child(toolbar_button(
         "mode-toggle",
         icon,
         tip,
+        Some("secondary-shift-e"),
         cx,
         cx.listener(|this, _, window, cx| this.toggle_mode(&ToggleMode, window, cx)),
       ));
@@ -1238,25 +1438,35 @@ impl DocumentView {
         // A div, not gpui's `image_cache` element: that one skips the cache during prepaint,
         // and inline images (`<img>` in a paragraph) lay out in prepaint, so they would fall
         // back to gpui's global loader and treat document-relative paths as URLs.
+        // The find bar takes its own row above the preview, so it never covers
+        // a match near the top.
         div()
+          .flex()
+          .flex_col()
           .flex_1()
           .min_h_0()
-          .text_size(gpui_kit::px(16.))
-          .line_height(gpui_kit::relative(1.6))
+          .children(self.find.clone())
           .child(
-            div().image_cache(self.image_cache.clone()).size_full().child(
-              TextView::new(&preview)
-                .style(style)
-                .selectable(true)
-                .scrollable(true)
-                .px((viewport - preview_width) / 2.)
-                .selection_format(SelectionFormat::Source)
-                .on_link_click(|url, _event, _window, cx| {
-                  if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") {
-                    cx.open_url(url);
-                  }
-                }),
-            ),
+            div()
+              .flex_1()
+              .min_h_0()
+              .text_size(gpui_kit::px(16.))
+              .line_height(gpui_kit::relative(1.6))
+              .child(
+                div().image_cache(self.image_cache.clone()).size_full().child(
+                  TextView::new(&preview)
+                    .style(style)
+                    .selectable(true)
+                    .scrollable(true)
+                    .px((viewport - preview_width) / 2.)
+                    .selection_format(SelectionFormat::Source)
+                    .on_link_click(|url, _event, _window, cx| {
+                      if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") {
+                        cx.open_url(url);
+                      }
+                    }),
+                ),
+              ),
           )
           .into_any_element()
       },
@@ -1264,63 +1474,94 @@ impl DocumentView {
   }
   fn permission_button(
     id: &'static str,
-    label: String,
+    label: impl Into<SharedString>,
+    tip: Option<&'static str>,
     hover: gpui_kit::Hsla,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
   ) -> impl IntoElement {
     div()
       .id(id)
       .px_2()
-      .py_0p5()
+      .py_1()
       .rounded_sm()
       .cursor_pointer()
       .hover(move |style| style.bg(hover))
+      .when_some(tip, |button, tip| {
+        button.tooltip(move |window, cx| tooltip(tip.into(), None, window, cx))
+      })
       .on_click(on_click)
-      .child(label)
+      .child(label.into())
   }
 
   fn render_permission_bar(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
     let requests = self.requests.read(cx);
-    if requests.is_empty() {
-      return None;
-    }
     let first = requests.pending.first()?;
     let family = first.family.clone();
     let count = requests.pending.len();
     let theme = cx.theme();
+    let hover = theme.accent;
+    let bar = div()
+      .flex()
+      .items_center()
+      .gap_2()
+      .h_8()
+      .px_3()
+      .border_t_1()
+      .border_color(theme.border)
+      .bg(theme.muted)
+      .text_sm();
+    if self.permission_prompt == PermissionPrompt::ConfirmAlways {
+      return Some(
+        bar
+          .child("Load remote content in every document, from any site?")
+          .child(div().flex_1())
+          .child(Self::permission_button(
+            "allow-always-cancel",
+            "Cancel",
+            None,
+            hover,
+            cx.listener(|this, _, _, cx| this.set_permission_prompt(PermissionPrompt::Families, cx)),
+          ))
+          .child(Self::permission_button(
+            "allow-always-confirm",
+            "Allow everywhere",
+            Some("Turn this off later with allow_remote in settings"),
+            hover,
+            cx.listener(|this, _, _, cx| this.answer_always(cx)),
+          )),
+      );
+    }
     let more = if count > 1 {
       format!(" and {} more", count - 1)
     } else {
       String::new()
     };
     let allow_family = family.clone();
-    let allow_once = Self::permission_button(
-      "allow-family",
-      format!("Allow {family}"),
-      theme.muted,
-      cx.listener(move |this, _, _, cx| this.answer_family(allow_family.clone(), cx)),
-    );
-    let allow_always = Self::permission_button(
-      "allow-always",
-      "Always allow remote content".to_owned(),
-      theme.muted,
-      cx.listener(|this, _, _, cx| this.answer_always(cx)),
-    );
     Some(
-      div()
-        .flex()
-        .items_center()
-        .gap_3()
-        .h_8()
-        .px_3()
-        .border_t_1()
-        .border_color(theme.border)
-        .bg(theme.muted)
-        .text_sm()
+      bar
         .child(format!("This document wants content from {family}{more}"))
         .child(div().flex_1())
-        .child(allow_once)
-        .child(allow_always),
+        .child(Self::permission_button(
+          "decline-families",
+          "Not now",
+          Some("Keep placeholders and stop asking in this document"),
+          hover,
+          cx.listener(|this, _, _, cx| this.decline_families(cx)),
+        ))
+        .child(Self::permission_button(
+          "allow-family",
+          format!("Allow {family}"),
+          Some("Saved in settings; also covers its subdomains"),
+          hover,
+          cx.listener(move |this, _, _, cx| this.answer_family(allow_family.clone(), cx)),
+        ))
+        .child(Self::permission_button(
+          "allow-always",
+          "Always allow…",
+          Some("Allow remote content in every document"),
+          hover,
+          cx.listener(|this, _, _, cx| this.set_permission_prompt(PermissionPrompt::ConfirmAlways, cx)),
+        )),
     )
   }
 }
@@ -1349,6 +1590,9 @@ impl Render for DocumentView {
       .on_action(cx.listener(Self::open_ui_font_picker))
       .on_action(cx.listener(Self::open_code_font_picker))
       .on_action(cx.listener(Self::open_nearby_picker))
+      .on_action(cx.listener(Self::open_find))
+      .on_action(cx.listener(Self::next_match))
+      .on_action(cx.listener(Self::previous_match))
       .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| apply_external_paths(paths, cx)))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
       .relative()
@@ -2216,6 +2460,72 @@ pub(crate) mod tests {
 
     assert_eq!(initial, after_no_edit, "no edit, no reparse");
   }
+  #[gpui_kit::test]
+  fn find_in_preview_counts_forgiving_matches_and_wraps(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.md");
+    fs::write(&path, "# Café\n\nThe **cafe** opens. CAFE closes.\n").unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_find(&crate::actions::Find, window, cx)));
+    view.update(cx, |view, cx| {
+      view.find_query = "cafe".to_owned();
+      view.run_find(cx);
+    });
+    let (count, current) = view.read_with(cx, |view, _| (view.find_matches.len(), view.find_current));
+    assert_eq!(
+      (count, current),
+      (3, Some(0)),
+      "accent and case fold; bold markers are not text"
+    );
+
+    for _ in 0..3 {
+      cx.update(|window, cx| view.update(cx, |view, cx| view.next_match(&crate::actions::NextMatch, window, cx)));
+    }
+    assert_eq!(view.read_with(cx, |view, _| view.find_current), Some(0), "next wraps");
+    cx.update(|window, cx| {
+      view.update(cx, |view, cx| view.previous_match(&crate::actions::PreviousMatch, window, cx));
+    });
+    assert_eq!(view.read_with(cx, |view, _| view.find_current), Some(2), "previous wraps");
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_mode(&crate::actions::ToggleMode, window, cx)));
+    assert!(
+      view.read_with(cx, |view, _| view.find.is_none() && view.find_matches.is_empty()),
+      "editing drops the preview's find bar"
+    );
+  }
+
+  #[gpui_kit::test]
+  fn find_in_the_editor_opens_its_search(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "name = \"demo\"\n").unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_find(&crate::actions::Find, window, cx)));
+
+    let active = view.read_with(cx, |view, cx| {
+      view
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.read(cx).search_session().is_active())
+    });
+    assert!(active, "Edit > Find reaches the editor's search");
+    assert!(
+      view.read_with(cx, |view, _| view.find.is_none()),
+      "no preview bar in the editor"
+    );
+  }
+
   #[gpui_kit::test]
   fn large_markdown_preview_parses_in_the_background_and_notifies(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -4187,6 +4497,46 @@ pub(crate) mod tests {
     assert!(matches!(load_image(&view, first, cx), Some(Ok(_))));
     assert!(matches!(load_image(&view, second, cx), Some(Ok(_))));
     assert_eq!(fetcher.calls().len(), 2);
+  }
+
+  #[gpui_kit::test]
+  fn not_now_stops_asking_and_saves_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (settings_dir, _store) = install_globals(cx);
+    let doc = tempfile::tempdir().unwrap();
+    let path = doc.path().join("doc.md");
+    fs::write(&path, "# Images\n").unwrap();
+    let url = "https://a.example.org/x.png";
+    let fetcher = install_fetcher(HashMap::from([(url.to_owned(), Ok(png(4, 3)))]), cx);
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+    let settings_path = settings_dir.path().join("settings.toml");
+    set_settings_path(&view, settings_path.clone(), cx);
+    let image = Resource::Uri(url.into());
+    assert!(load_image(&view, image.clone(), cx).is_none());
+    cx.run_until_parked();
+    assert!(load_image(&view, image.clone(), cx).is_none());
+    let requests = requests(&view, cx);
+    assert!(!requests.read_with(cx, |requests, _| requests.is_empty()), "the bar asks");
+
+    view.update(cx, DocumentView::decline_families);
+    // A settings change retries every resource, which would ask again.
+    view.update(cx, |_, cx| {
+      SettingsStore::update(cx, |settings| settings.always_show_status_bar = true);
+    });
+    cx.run_until_parked();
+    assert!(load_image(&view, image, cx).is_none());
+    cx.run_until_parked();
+
+    assert!(
+      requests.read_with(cx, |requests, _| requests.is_empty()),
+      "the declined family stays quiet"
+    );
+    assert!(fetcher.calls().is_empty(), "nothing is fetched");
+    let settings = Settings::load(&settings_path).unwrap();
+    assert!(!settings.allow_remote);
+    assert!(!settings.allowed_domains.iter().any(|domain| domain == "example.org"));
   }
 
   #[gpui_kit::test]

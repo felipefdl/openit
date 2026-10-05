@@ -31,10 +31,10 @@ use crate::actions::{
   ZoomToFit,
 };
 use crate::document_view::DocumentView;
+use crate::find_bar::{FindBar, FindBarEvent};
 use crate::font_picker::{FontPicker, FontPickerEvent, FontSlot};
 use crate::image_decode;
 use crate::nearby_picker::{NearbyPicker, NearbyPickerEvent};
-use crate::pdf_find::{FindBar, FindBarEvent};
 use crate::pdf_prompts::{GoToPage as GoToPagePrompt, GoToPageEvent, PasswordPrompt, PasswordPromptEvent};
 use crate::session::PendingCleanups;
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
@@ -824,24 +824,37 @@ impl PdfView {
       .map_or_else(|| self.title(), |document| document.read(cx).title())
   }
 
-  /// The Markdown button's icon and tooltip for the state it is in: the pen
-  /// generates, the open book edits, the eye returns to the preview.
-  fn markdown_button(&self, cx: &App) -> (Icon, &'static str) {
+  /// The Markdown button's icon, tooltip, and shortcut for the state it is in:
+  /// the pen generates, the open book edits, the eye returns to the preview.
+  fn markdown_button(&self, cx: &App) -> (Icon, &'static str, Option<&'static str>) {
     if self.is_converting() {
-      return (Icon::empty().path("icons/notebook-pen.svg"), "Generating… (click to cancel)");
+      return (
+        Icon::empty().path("icons/notebook-pen.svg"),
+        "Generating… (click to cancel)",
+        None,
+      );
     }
     let Some(document) = self.markdown.as_ref() else {
-      return (Icon::empty().path("icons/notebook-pen.svg"), "Generate Markdown (Cmd+Shift+M)");
+      return (
+        Icon::empty().path("icons/notebook-pen.svg"),
+        "Generate Markdown",
+        Some("secondary-shift-m"),
+      );
     };
     if self.shows_markdown() && document.read(cx).is_editing() {
-      (Icon::new(gpui_kit::component::IconName::Eye), "Markdown preview (Cmd+Shift+E)")
+      (
+        Icon::new(gpui_kit::component::IconName::Eye),
+        "Markdown preview",
+        Some("secondary-shift-e"),
+      )
     } else if self.shows_markdown() {
       (
         Icon::empty().path("icons/book-open-text.svg"),
-        "Edit the Markdown (Cmd+Shift+E)",
+        "Edit the Markdown",
+        Some("secondary-shift-e"),
       )
     } else {
-      (Icon::new(gpui_kit::component::IconName::Eye), "Show the Markdown")
+      (Icon::new(gpui_kit::component::IconName::Eye), "Show the Markdown", None)
     }
   }
 
@@ -1395,17 +1408,19 @@ impl PdfView {
         actions.child(toolbar_button(
           "pdf-pages",
           Icon::empty().path("icons/presentation.svg"),
-          "PDF pages (Cmd+Shift+P)",
+          "PDF pages",
+          Some("secondary-shift-p"),
           cx,
           cx.listener(|view, _, window, cx| view.show_pdf(&PdfPages, window, cx)),
         ))
       })
       .when(self.document().is_some(), |actions| {
-        let (icon, tip) = self.markdown_button(cx);
+        let (icon, tip, shortcut) = self.markdown_button(cx);
         actions.child(toolbar_button(
           "markdown-views",
           icon,
           tip,
+          shortcut,
           cx,
           cx.listener(|view, _, window, cx| view.show_markdown(&ConvertToMarkdown, window, cx)),
         ))
@@ -1531,6 +1546,10 @@ impl PdfView {
       match_found: theme.warning.opacity(0.35),
       current_match: theme.warning.opacity(0.6),
     };
+    // Until the first page lays out, say what is happening instead of showing
+    // an empty surface.
+    let opening = matches!(self.load, Load::Opening).then(|| format!("Opening {}…", self.title()));
+    let muted = theme.muted_foreground;
     div()
       .id("pdf-surface")
       .relative()
@@ -1569,6 +1588,19 @@ impl PdfView {
           .inset_0()
           .child(Scrollbar::vertical(&scroll).id("pdf-scrollbar").viewport_from_layout()),
       )
+      .when_some(opening, |surface, message| {
+        surface.child(
+          div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(muted)
+            .child(message),
+        )
+      })
       .into_any_element()
   }
 
@@ -1767,7 +1799,14 @@ impl Render for PdfView {
           .flex_1()
           .min_h_0()
           .child(body)
-          .children(self.find.clone().map(IntoElement::into_any_element)),
+          // Over the pages: the reader scrolls a match a third of the way
+          // down, clear of the bar.
+          .children(
+            self
+              .find
+              .clone()
+              .map(|find| div().absolute().top_0().left_0().right_0().child(find)),
+          ),
       )
       .children(self.render_status_bar(cx))
       .children(self.prompt.as_ref().map(Prompt::element))
