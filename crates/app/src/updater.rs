@@ -402,12 +402,10 @@ fn check_sync(current: &str) -> UpdateCheck {
   }
 }
 
+/// Start the installed version and exit. The Windows installer restarts the
+/// app itself, so Windows never calls this.
+#[cfg(not(windows))]
 fn relaunch(update: &Update) -> Result<(), String> {
-  #[cfg(windows)]
-  {
-    let _ = update;
-    Ok(())
-  }
   #[cfg(target_os = "macos")]
   {
     std::process::Command::new("open")
@@ -417,7 +415,7 @@ fn relaunch(update: &Update) -> Result<(), String> {
       .map_err(|err| err.to_string())?;
     std::process::exit(0);
   }
-  #[cfg(not(any(windows, target_os = "macos")))]
+  #[cfg(not(target_os = "macos"))]
   {
     std::process::Command::new(&update.extract_path)
       .spawn()
@@ -428,7 +426,9 @@ fn relaunch(update: &Update) -> Result<(), String> {
 
 fn install_sync(mut update: Update, on_progress: &(dyn Fn(u8) + Send + Sync)) -> Result<(), String> {
   install_package(&mut update, on_progress)?;
-  relaunch(&update)
+  #[cfg(not(windows))]
+  relaunch(&update)?;
+  Ok(())
 }
 
 fn install_package(update: &mut Update, on_progress: &(dyn Fn(u8) + Send + Sync)) -> Result<(), String> {
