@@ -560,7 +560,7 @@ mod tests {
   fn init_registers_every_bundled_theme(cx: &TestAppContext) {
     init_theme(cx);
     cx.update(|cx| {
-      assert!(!ThemeCatalog::get(cx).entries.is_empty());
+      assert!(!ThemeCatalog::get(cx).entries.is_empty(), "bundled themes are registered");
       assert_eq!(ThemeCatalog::get(cx).kind("one-dark"), Some(ThemeKind::Dark));
       assert_eq!(ThemeCatalog::get(cx).kind("one-light"), Some(ThemeKind::Light));
       assert!(ThemeCatalog::get(cx).kind("gruvbox-dark-hard").is_some());

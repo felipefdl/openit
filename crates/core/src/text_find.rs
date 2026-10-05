@@ -127,6 +127,7 @@ mod tests {
 
   #[test]
   fn find_ignores_a_blank_query() {
-    assert!(find("anything", "   ").is_empty());
+    let ranges = find("anything", "   ");
+    assert!(ranges.is_empty(), "{ranges:?}");
   }
 }

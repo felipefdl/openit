@@ -2804,10 +2804,10 @@ pub(crate) mod tests {
     cx.run_until_parked();
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "newold");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     cx.executor().advance_clock(CHECKPOINT_DELAY);
     cx.run_until_parked();
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
   }
 
   #[gpui_kit::test]
@@ -3129,7 +3129,7 @@ pub(crate) mod tests {
     cx.simulate_prompt_answer("Discard");
     drop(view);
     cx.run_until_parked();
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
     assert_eq!(cx.windows().len(), 0);
   }
@@ -3156,7 +3156,7 @@ pub(crate) mod tests {
     cx.run_until_parked();
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3180,7 +3180,7 @@ pub(crate) mod tests {
     cx.executor().advance_clock(CHECKPOINT_DELAY);
     cx.run_until_parked();
 
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3210,7 +3210,7 @@ pub(crate) mod tests {
     cx.run_until_parked();
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3325,7 +3325,7 @@ pub(crate) mod tests {
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert!(cx.foreground_executor().block_test(task));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
   }
 
   #[gpui_kit::test]
@@ -3350,7 +3350,7 @@ pub(crate) mod tests {
 
     assert!(cx.foreground_executor().block_test(task));
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3376,7 +3376,7 @@ pub(crate) mod tests {
 
     assert!(cx.foreground_executor().block_test(task));
     assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3489,7 +3489,7 @@ pub(crate) mod tests {
     cx.run_until_parked();
 
     assert!(fs::read_to_string(&path).unwrap().starts_with('x'));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3554,7 +3554,7 @@ pub(crate) mod tests {
 
     assert!(fs::read_to_string(&path).unwrap().starts_with('x'));
     assert!(!view.read_with(cx, |v, _| v.is_dirty()));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
   }
 
   #[gpui_kit::test]
@@ -3787,7 +3787,7 @@ pub(crate) mod tests {
 
     let text = fs::read_to_string(&path).unwrap();
     assert!(text == "old" || text == "saved");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3835,7 +3835,7 @@ pub(crate) mod tests {
     cx.run_until_parked();
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3870,7 +3870,7 @@ pub(crate) mod tests {
     assert!(!cx.simulate_close());
     drop(view);
     cx.run_until_parked();
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3935,7 +3935,7 @@ pub(crate) mod tests {
 
     cx.run_until_parked();
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
     assert!(cx.foreground_executor().block_test(task));
   }
@@ -3966,7 +3966,7 @@ pub(crate) mod tests {
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -3988,7 +3988,7 @@ pub(crate) mod tests {
 
     cx.run_until_parked();
     assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
     assert!(cx.foreground_executor().block_test(task));
   }
@@ -4816,7 +4816,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
     settle_schemas(&view, cx);
-    assert!(!diagnostic_entries(&view, cx).is_empty());
+    assert!(!diagnostic_entries(&view, cx).is_empty(), "a schema issue is reported");
     cx.simulate_input(" ");
     cx.run_until_parked();
     assert!(diagnostic_entries(&view, cx).is_empty(), "edits clear the set");
@@ -4849,7 +4849,7 @@ pub(crate) mod tests {
     cx.update(|_, cx| {
       view.update(cx, |view, cx| view.apply_schema_issues(Revision::INITIAL, stale, cx));
     });
-    assert!(diagnostic_entries(&view, cx).is_empty());
+    assert!(diagnostic_entries(&view, cx).is_empty(), "no schema issue remains");
   }
 
   #[gpui_kit::test]
@@ -4867,7 +4867,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
     settle_schemas(&view, cx);
-    assert!(!diagnostic_entries(&view, cx).is_empty());
+    assert!(!diagnostic_entries(&view, cx).is_empty(), "a schema issue is reported");
     cx.update(|window, cx| view.update(cx, |view, cx| view.save(&crate::actions::Save, window, cx)));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
@@ -4890,7 +4890,7 @@ pub(crate) mod tests {
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
     settle_schemas(&view, cx);
-    assert!(diagnostic_entries(&view, cx).is_empty());
+    assert!(diagnostic_entries(&view, cx).is_empty(), "no schema issue remains");
     view.read_with(cx, |view, cx| {
       assert_eq!(view.schema_status(cx).as_deref(), Some("missing.json"));
       assert!(view.last_error().is_none());

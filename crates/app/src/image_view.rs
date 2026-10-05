@@ -2084,7 +2084,7 @@ mod tests {
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
 
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 
@@ -2106,7 +2106,7 @@ mod tests {
     assert!(!cx.has_pending_prompt(), "the turn was the decision; the close just writes it");
     assert_eq!(cx.windows().len(), 0);
     assert_eq!(image::open(&path).unwrap().into_rgba8().dimensions(), (2, 4));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
   }
 
   #[gpui_kit::test]
@@ -2226,7 +2226,7 @@ mod tests {
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert!(cx.foreground_executor().block_test(quit));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().is_empty(), "{:?}", store.list());
     assert_eq!(cx.windows().len(), 0);
   }
 

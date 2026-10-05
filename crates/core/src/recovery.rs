@@ -319,7 +319,8 @@ mod tests {
 
     store.remove(session).unwrap();
     assert!(store.read_blob(session).is_err());
-    assert!(store.list().unwrap().is_empty());
+    let drafts = store.list().unwrap();
+    assert!(drafts.is_empty(), "{drafts:?}");
   }
 
   #[test]
@@ -329,7 +330,8 @@ mod tests {
 
     store.checkpoint(&image_draft(SessionId::new())).unwrap();
 
-    assert!(store.list().unwrap().is_empty());
+    let drafts = store.list().unwrap();
+    assert!(drafts.is_empty(), "{drafts:?}");
   }
 
   #[test]
@@ -480,7 +482,8 @@ mod tests {
     store.remove(d.session).unwrap();
     store.remove(d.session).unwrap();
 
-    assert!(store.list().unwrap().is_empty());
+    let drafts = store.list().unwrap();
+    assert!(drafts.is_empty(), "{drafts:?}");
     let leftover: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
     assert!(leftover.is_empty(), "{leftover:?}");
   }

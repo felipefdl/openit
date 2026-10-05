@@ -93,7 +93,8 @@ mod tests {
     };
     let parsed = parse(JsonFamily::Json, text).expect("parse");
     let compiled = CompiledSchema::get_or_compile(None, &documents).ok();
-    assert!(collect_issues(Ok(&parsed), compiled.as_ref()).is_empty());
+    let issues = collect_issues(Ok(&parsed), compiled.as_ref());
+    assert!(issues.is_empty(), "{issues:?}");
   }
 
   #[test]
@@ -108,6 +109,7 @@ mod tests {
     let reused = CompiledSchema::get_or_compile(Some(first), &documents).expect("reuse");
     assert_eq!(reused.identity(), &identity);
     let parsed = parse(JsonFamily::Json, "{\n  \"n\": 1\n}\n").expect("parse");
-    assert!(collect_issues(Ok(&parsed), Some(&reused)).is_empty());
+    let issues = collect_issues(Ok(&parsed), Some(&reused));
+    assert!(issues.is_empty(), "{issues:?}");
   }
 }

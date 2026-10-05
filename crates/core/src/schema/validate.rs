@@ -309,7 +309,8 @@ mod tests {
       json!({ "properties": { "n": { "$ref": "https://openit.test/number.json" } } }),
       &[("https://openit.test/number.json", json!({ "type": "number", "minimum": 5 }))],
     );
-    assert!(compiled.validate(&parsed).is_empty());
+    let issues = compiled.validate(&parsed);
+    assert!(issues.is_empty(), "{issues:?}");
   }
 
   #[test]

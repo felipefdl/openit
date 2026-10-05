@@ -402,7 +402,7 @@ mod tests {
     assert!(conversion.markdown.contains("Hello World"), "{}", conversion.markdown);
     assert!(conversion.markdown.contains("Second page"), "{}", conversion.markdown);
     assert!(!conversion.markdown.contains("<!-- Page"), "{}", conversion.markdown);
-    assert!(conversion.figures.is_empty());
+    assert!(conversion.figures.is_empty(), "{:?}", conversion.figures);
     assert_eq!(progress.last(), Some(&(2, 2)));
   }
 

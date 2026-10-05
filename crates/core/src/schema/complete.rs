@@ -676,7 +676,7 @@ mod tests {
   #[test]
   fn no_schema_yields_no_items() {
     let items = completions(JsonFamily::Json, "{ ", 2, None);
-    assert!(items.is_empty());
+    assert!(items.is_empty(), "{items:?}");
   }
 
   #[test]

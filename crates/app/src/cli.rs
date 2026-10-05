@@ -240,7 +240,7 @@ mod tests {
 
     let resolved = open_of(parse(["a.md", "b.txt"], &cwd).unwrap());
     assert_eq!(resolved.paths, vec![abs(&a), abs(&b)]);
-    assert!(resolved.errors.is_empty());
+    assert!(resolved.errors.is_empty(), "{:?}", resolved.errors);
     assert!(resolved.had_operands);
   }
 
@@ -252,7 +252,7 @@ mod tests {
 
     let resolved = open_of(parse(["--", "--help"], &cwd).unwrap());
     assert_eq!(resolved.paths, vec![abs(&flagged)]);
-    assert!(resolved.errors.is_empty());
+    assert!(resolved.errors.is_empty(), "{:?}", resolved.errors);
   }
 
   #[test]
@@ -277,7 +277,7 @@ mod tests {
   fn missing_file_is_dropped() {
     let (_keep, cwd) = temp_cwd();
     let resolved = open_of(parse(["missing.md"], &cwd).unwrap());
-    assert!(resolved.paths.is_empty());
+    assert!(resolved.paths.is_empty(), "{:?}", resolved.paths);
     assert_eq!(resolved.errors, ["openit: missing.md: no such file"]);
     assert!(resolved.is_empty_after_operands());
   }
@@ -287,7 +287,7 @@ mod tests {
     let (_keep, cwd) = temp_cwd();
     fs::create_dir(cwd.join("docs")).unwrap();
     let resolved = open_of(parse(["docs"], &cwd).unwrap());
-    assert!(resolved.paths.is_empty());
+    assert!(resolved.paths.is_empty(), "{:?}", resolved.paths);
     assert_eq!(resolved.errors, ["openit: docs: is a directory"]);
     assert!(resolved.is_empty_after_operands());
   }
@@ -296,8 +296,8 @@ mod tests {
   fn empty_argv_is_an_empty_launch() {
     let (_keep, cwd) = temp_cwd();
     let resolved = open_of(parse(std::iter::empty::<&str>(), &cwd).unwrap());
-    assert!(resolved.paths.is_empty());
-    assert!(resolved.errors.is_empty());
+    assert!(resolved.paths.is_empty(), "{:?}", resolved.paths);
+    assert!(resolved.errors.is_empty(), "{:?}", resolved.errors);
     assert!(!resolved.had_operands);
     assert!(!resolved.is_empty_after_operands());
   }

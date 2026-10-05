@@ -308,7 +308,7 @@ mod tests {
     let error =
       decode_document(b"not an image", openit_core::document::ImageFormat::Png, Transform::IDENTITY).unwrap_err();
 
-    assert!(!error.is_empty());
+    assert!(!error.is_empty(), "the refusal explains itself");
   }
 
   #[test]

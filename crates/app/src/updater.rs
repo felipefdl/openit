@@ -873,7 +873,7 @@ mod tests {
     cx.update(|cx| {
       assert!(!cx.global::<UpdaterState>().can_install());
       assert!(active_dialog(cx).is_none());
-      assert!(cx.windows().is_empty());
+      assert!(cx.windows().is_empty(), "{:?}", cx.windows());
     });
   }
 

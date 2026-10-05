@@ -686,7 +686,8 @@ mod tests {
 
     assert_eq!(search(&layer, "hello world").len(), 1);
     assert_eq!(search(&layer, "hello   world").len(), 1);
-    assert!(search(&layer, "helloworld").is_empty());
+    let hits = search(&layer, "helloworld");
+    assert!(hits.is_empty(), "{hits:?}");
   }
 
   #[test]
@@ -710,7 +711,8 @@ mod tests {
   fn an_empty_query_matches_nothing() {
     let layer = layer(&[&[("alpha", 72.0, 700.0)]]);
 
-    assert!(search(&layer, "   ").is_empty());
+    let hits = search(&layer, "   ");
+    assert!(hits.is_empty(), "{hits:?}");
   }
 
   #[test]

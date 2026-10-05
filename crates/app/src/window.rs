@@ -719,7 +719,7 @@ mod tests {
     cx.run_until_parked();
 
     assert_eq!(cx.windows().len(), 0);
-    assert!(handed_off(&recorded).is_empty());
+    assert!(handed_off(&recorded).is_empty(), "{:?}", handed_off(&recorded));
   }
 
   #[gpui_kit::test]
@@ -754,7 +754,7 @@ mod tests {
         .is_some(),
       "a PDF opens in the PDF reader"
     );
-    assert!(handed_off(&recorded).is_empty());
+    assert!(handed_off(&recorded).is_empty(), "{:?}", handed_off(&recorded));
   }
 
   #[gpui_kit::test]
@@ -1054,7 +1054,7 @@ mod tests {
   #[gpui_kit::test]
   fn reopen_with_zero_windows_opens_one_empty(cx: &mut TestAppContext) {
     init_app(cx);
-    assert!(cx.windows().is_empty());
+    assert!(cx.windows().is_empty(), "{:?}", cx.windows());
     cx.update(on_reopen);
     assert_eq!(cx.windows().len(), 1);
     assert!(
@@ -1079,7 +1079,7 @@ mod tests {
     close_last_window(cx);
     cx.run_until_parked();
 
-    assert!(cx.windows().is_empty());
+    assert!(cx.windows().is_empty(), "{:?}", cx.windows());
     let quit = cx.update(|cx| cx.global::<crate::QuitCommitted>().0);
     assert_eq!(quit, !cfg!(target_os = "macos"));
     if !quit {
@@ -1100,7 +1100,7 @@ mod tests {
     cx.update(|cx| open_document_window(path, cx));
     assert_eq!(cx.windows().len(), 1, "the document has not opened yet");
     close_last_window(cx);
-    assert!(cx.windows().is_empty());
+    assert!(cx.windows().is_empty(), "{:?}", cx.windows());
     assert!(!cx.update(|cx| cx.global::<crate::QuitCommitted>().0));
 
     cx.run_until_parked();
