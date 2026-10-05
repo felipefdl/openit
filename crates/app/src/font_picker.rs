@@ -65,9 +65,15 @@ pub struct FontPicker {
 impl EventEmitter<FontPickerEvent> for FontPicker {}
 
 impl FontPicker {
-  /// Open the picker on the current family for `slot`, with search focused.
+  /// Open the picker on the current family for `slot`, with search focused,
+  /// listing every family the platform reports.
   pub fn new(slot: FontSlot, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let names = cx.text_system().all_font_names();
+    Self::with_names(slot, names, window, cx)
+  }
+
+  /// Open the picker over `names`.
+  fn with_names(slot: FontSlot, names: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.focus(window, cx));
     let previewed = Some(current_name(slot, cx).to_string());
@@ -306,48 +312,45 @@ mod tests {
     });
   }
 
+  /// The test platform's text system lists no families, so the tests supply them.
+  fn families() -> Vec<String> {
+    vec!["Alpha Sans".to_owned(), "Beta Mono".to_owned(), "Gamma Serif".to_owned()]
+  }
+
   #[gpui_kit::test]
-  fn ui_font_opener_lists_all_font_names_and_enter_writes_ui_only(cx: &mut TestAppContext) {
+  fn ui_font_enter_writes_ui_only(cx: &mut TestAppContext) {
     init_app(cx);
     set_saved_fonts("KeepUi", "KeepCode", cx);
-    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::new(FontSlot::Ui, window, cx));
-    let names = cx.update(|_, cx| cx.text_system().all_font_names());
-    picker.read_with(cx, |picker, _| assert_eq!(picker.names(), names.as_slice()));
-    assert!(!names.is_empty(), "the text system must list at least one family");
+    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::with_names(FontSlot::Ui, families(), window, cx));
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm(IndexPath::new(0), window, cx)));
     cx.run_until_parked();
-    let family = names[0].clone();
     cx.update(|_, cx| {
       let font = &cx.global::<AppSettings>().0.font;
-      assert_eq!(font.ui.as_deref(), Some(family.as_str()));
+      assert_eq!(font.ui.as_deref(), Some("Alpha Sans"));
       assert_eq!(font.code.as_deref(), Some("KeepCode"));
     });
   }
 
   #[gpui_kit::test]
-  fn code_font_opener_lists_all_font_names_and_enter_writes_code_only(cx: &mut TestAppContext) {
+  fn code_font_enter_writes_code_only(cx: &mut TestAppContext) {
     init_app(cx);
     set_saved_fonts("KeepUi", "KeepCode", cx);
-    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::new(FontSlot::Code, window, cx));
-    let names = cx.update(|_, cx| cx.text_system().all_font_names());
-    picker.read_with(cx, |picker, _| assert_eq!(picker.names(), names.as_slice()));
-    assert!(!names.is_empty(), "the text system must list at least one family");
+    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::with_names(FontSlot::Code, families(), window, cx));
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm(IndexPath::new(0), window, cx)));
     cx.run_until_parked();
-    let family = names[0].clone();
     cx.update(|_, cx| {
       let font = &cx.global::<AppSettings>().0.font;
       assert_eq!(font.ui.as_deref(), Some("KeepUi"));
-      assert_eq!(font.code.as_deref(), Some(family.as_str()));
+      assert_eq!(font.code.as_deref(), Some("Alpha Sans"));
     });
   }
 
   #[gpui_kit::test]
   fn moving_the_highlight_previews_the_matching_field_and_escape_restores_the_pair(cx: &mut TestAppContext) {
     init_app(cx);
-    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::new(FontSlot::Ui, window, cx));
+    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::with_names(FontSlot::Ui, families(), window, cx));
     let names = picker.read_with(cx, |picker, _| picker.names().to_vec());
     let (saved_ui, saved_code) = cx.update(|_, cx| {
       let theme = Theme::global(cx);
@@ -358,7 +361,7 @@ mod tests {
       .find(|name| *name != saved_ui.as_ref())
       .cloned()
       .or_else(|| names.first().cloned())
-      .expect("the text system must list at least one family");
+      .expect("the test list has families");
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.preview_name(&preview, window, cx)));
     cx.update(|_, cx| {
@@ -387,7 +390,7 @@ mod tests {
   #[gpui_kit::test]
   fn code_highlight_previews_mono_only(cx: &mut TestAppContext) {
     init_app(cx);
-    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::new(FontSlot::Code, window, cx));
+    let (picker, cx) = cx.add_window_view(|window, cx| FontPicker::with_names(FontSlot::Code, families(), window, cx));
     let names = picker.read_with(cx, |picker, _| picker.names().to_vec());
     let (saved_ui, saved_code) = cx.update(|_, cx| {
       let theme = Theme::global(cx);
@@ -398,7 +401,7 @@ mod tests {
       .find(|name| *name != saved_code.as_ref())
       .cloned()
       .or_else(|| names.first().cloned())
-      .expect("the text system must list at least one family");
+      .expect("the test list has families");
 
     cx.update(|window, cx| picker.update(cx, |picker, cx| picker.preview_name(&preview, window, cx)));
     cx.update(|_, cx| {

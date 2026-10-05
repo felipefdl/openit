@@ -23,14 +23,14 @@ serde = { version = "1.0", features = ["derive"] }
 cargo-packager-updater = "0.2"
 serde_json = "1.0"
 # JSON, JSONC, and JSON5 with comments, trailing commas, and AST ranges. MIT.
-jsonc-parser = { version = "0.33.2", features = ["serde", "serde_json"] }
+jsonc-parser = { version = "0.34.0", features = ["serde", "serde_json"] }
 # JSON Schema validation. MIT. Defaults pull reqwest and aws-lc-rs.
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.58.5", default-features = false }
 # CompletionItem types for EditorState::lsp_mut().completion_provider.
 lsp-types = "0.97.0"
 toml = "1.1"
 # Session identity for drafts. v4 is random; serde carries it through draft files.
-uuid = { version = "1.26", features = ["v4", "serde"] }
+uuid = { version = "1.27", features = ["v4", "serde"] }
 # GPUI plus gpui-component editor and Markdown surfaces. tree-sitter-languages
 # compiles the syntax highlighting grammars in.
 image = { version = "0.25", default-features = false, features = [
@@ -44,8 +44,8 @@ image = { version = "0.25", default-features = false, features = [
   "tga",
   "pnm",
 ] }
-gpui-kit = { version = "0.6.1", features = ["tree-sitter-languages"] }
-# The version gpui-pre 0.3.4 already resolves, so the tree keeps one copy.
+gpui-kit = { version = "0.7.0", features = ["tree-sitter-languages"] }
+# The version gpui-pre 0.3.7 already resolves, so the tree keeps one copy.
 # Static rendering only: no scripts, no animation, no network.
 resvg = { version = "0.46", default-features = false, features = [
   "text",
@@ -53,13 +53,13 @@ resvg = { version = "0.46", default-features = false, features = [
   "memmap-fonts",
   "raster-images",
 ] }
-# Exact pin mirroring gpui-base 0.6.1, so `EditorState::text()` and core
+# Exact pin mirroring gpui-base 0.7.0, so `EditorState::text()` and core
 # snapshots are one type and share structure instead of copying.
 ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
 # Pure-Rust PDF rasterizer, CPU only. Default features embed the fourteen
 # standard fonts and the predefined CMaps, so rendering needs nothing from the
 # system and nothing is bundled per platform.
-hayro = "0.7"
+hayro = "0.8"
 # Pure-Rust PDF text extraction and Markdown conversion. Default features only:
 # no OCR, no PDFium.
 pdf-inspector = "1"
@@ -75,7 +75,7 @@ async-channel = "2.5"
 # Fuzzy ranking for nearby files. MPL-2.0, already allowed in deny.toml.
 nucleo-matcher = "0.3"
 futures = "0.3"
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.7" }
 tempfile = "3.27"
 tracing = "0.1"
 # Unix domain socket on macOS and Linux, named pipe on Windows, one API.

@@ -12,10 +12,10 @@ JSON, JSONC, and JSON5 documents complete from a JSON Schema: properties at the 
 
 ## Stack
 
-- `jsonc-parser` 0.33.1, MIT. Features `serde` and `serde_json`. `parse_to_ast` for source ranges.
-- `jsonschema` 0.56.0, MIT. `default-features = false` (defaults pull reqwest and aws-lc-rs). Build with `.offline()` / an in-memory registry after OpenIt has the bytes.
+- `jsonc-parser` 0.34.0, MIT. Features `serde` and `serde_json`. `parse_to_ast` for source ranges.
+- `jsonschema` 0.58.5, MIT. `default-features = false` (defaults pull reqwest and aws-lc-rs). Build with `.offline()` / an in-memory registry after OpenIt has the bytes.
 - Existing `Fetcher`, `ResourceCache`, and `PermissionRequests` for remote schema documents. Not jsonschema's HTTP client.
-- gpui-base 0.6.1 `EditorState::diagnostics_mut`, `DiagnosticSet::push`, `Lsp.completion_provider` (`CompletionProvider`). No language-server process.
+- gpui-base 0.7.0 `EditorState::diagnostics_mut`, `DiagnosticSet::push`, `Lsp.completion_provider` (`CompletionProvider`). No language-server process.
 - SchemaStore catalog index (`fileMatch` + `url`), bundled. Schema documents are not bundled; jsonschema already embeds draft meta-schemas.
 
 ## Decisions

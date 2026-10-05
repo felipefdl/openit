@@ -13,7 +13,7 @@ Every way a file reaches OpenIt ends in the same place: the `openit` and `oi` co
 
 - `interprocess` 2.4.4, default features: Unix domain socket on macOS and Linux, named pipe on Windows, one API. std has no named pipes. License `0BSD OR Apache-2.0`, both in `deny.toml`.
 - `serde_json` (already a dependency) for the one-line request.
-- gpui-pre 0.3.4 `ExternalPaths` with `on_drop`, `App::on_open_urls`, `App::on_reopen`. The test platform panics on the last two, so both sit behind a seam the tests drive, like `handoff::SystemOpener`.
+- gpui-pre 0.3.7 `ExternalPaths` with `on_drop`, `App::on_open_urls`, `App::on_reopen`. The test platform panics on the last two, so both sit behind a seam the tests drive, like `handoff::SystemOpener`.
 - gpui 0.2.2 `Window::replace_root` for filling the empty window in place, as `replace_document` already does.
 - cargo-packager 0.11.8 `[[package.metadata.packager.file-associations]]` for the macOS document types, the Windows "Open with" list, and the Linux `.desktop` MIME entries.
 - Installer logic for command-line symlinks, elevation (`osascript ... with administrator privileges`, `pkexec`), and a Windows shim plus user PATH entry.

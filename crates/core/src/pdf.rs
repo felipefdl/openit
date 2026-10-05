@@ -13,7 +13,8 @@ use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::page::Rotation;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderCache, RenderSettings, render};
+use hayro::vello_cpu::peniko::ImageAlphaType;
+use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 
 use crate::error::Error;
 
@@ -293,16 +294,21 @@ fn capped_scale(scale: f32, longest_edge_pt: f32, max_edge: u32) -> f32 {
 /// Render `page` at `scale`, optionally keeping only the pixels under `crop`.
 fn rasterize(document: &PdfDocument, page: usize, scale: f32, crop: Option<DisplayRect>) -> Result<PageBitmap, Error> {
   let target = document.pdf.pages().get(page).ok_or_else(|| missing_page(page))?;
-  let settings = RenderSettings {
+  let pixmap_settings = PixmapSettings {
     x_scale: scale,
     y_scale: scale,
     bg_color: WHITE,
-    ..RenderSettings::default()
   };
   // `RenderCache` is neither `Send` nor `Sync` and borrows the document, so it
   // cannot outlive one render call. Reusing one across pages measured no
   // faster, so each call gets its own.
-  let pixmap = render(target, &RenderCache::new(), &InterpreterSettings::default(), &settings);
+  let pixmap = render(
+    target,
+    &RenderCache::new(),
+    &InterpreterSettings::default(),
+    &RenderSettings::default(),
+    &pixmap_settings,
+  );
   let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
   if width == 0 || height == 0 {
     return Err(Error::Pdf {
@@ -310,23 +316,13 @@ fn rasterize(document: &PdfDocument, page: usize, scale: f32, crop: Option<Displ
     });
   }
   // The page is composited over opaque white, so premultiplied and straight
-  // alpha agree and the bytes need no per-pixel conversion. Take the pixmap
-  // buffer so the pixels are not copied off a borrow.
-  let rgba = pixmap_rgba(pixmap);
+  // alpha agree: taking the premultiplied buffer moves it out with no
+  // per-pixel conversion and no copy.
+  let rgba = pixmap.take_rgba8(ImageAlphaType::AlphaPremultiplied);
   let Some(crop) = crop else {
     return Ok(PageBitmap { page, width, height, rgba });
   };
   crop_rgba(page, &rgba, width, height, crop, scale)
-}
-
-/// Consume hayro's pixmap into a row-major RGBA8 buffer.
-fn pixmap_rgba(pixmap: hayro::vello_cpu::Pixmap) -> Vec<u8> {
-  let pixels = pixmap.take();
-  let mut rgba = Vec::with_capacity(pixels.len().saturating_mul(4));
-  for pixel in pixels {
-    rgba.extend_from_slice(&pixel.to_u8_array());
-  }
-  rgba
 }
 
 /// Rasterize `page` at the figure scale, capped on the page's longest edge.
