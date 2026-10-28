@@ -130,8 +130,8 @@ pub enum Entry {
   Loading(Shared<Task<Result<LoadResult, ImageCacheError>>>),
   /// A decoded raster image.
   Ready(Arc<RenderImage>),
-  /// The resource failed to read or decode.
-  Failed(ImageCacheError),
+  /// The resource failed to read or decode; it renders the shared placeholder.
+  Failed,
   /// The resource is waiting for permission from this family.
   AwaitingPermission(DomainFamily),
   /// The resource renders a shared placeholder.
@@ -266,7 +266,8 @@ impl DocumentImageCache {
         self.ready.touch(resource_hash);
         return Some(Ok(image));
       },
-      Some(Entry::Failed(error)) => return Some(Err(error.clone())),
+      // A failed image shows the same placeholder as a denied one, not an empty gap.
+      Some(Entry::Failed) => return Some(Ok(self.placeholder_image())),
       Some(Entry::AwaitingPermission(_)) | None => return None,
       Some(Entry::Placeholder(kind)) => {
         match kind {
@@ -292,8 +293,9 @@ impl DocumentImageCache {
         Some(Ok(image))
       },
       Err(error) => {
-        self.entries.insert(resource_hash, Entry::Failed(error.clone()));
-        Some(Err(error))
+        tracing::debug!(%error, "document image failed to load");
+        self.entries.insert(resource_hash, Entry::Failed);
+        Some(Ok(self.placeholder_image()))
       },
     }
   }
@@ -375,9 +377,8 @@ impl DocumentImageCache {
       },
       Resolved::Remote(url) => {
         let Some(family) = family else {
-          self
-            .entries
-            .insert(resource_hash, Entry::Failed(other_error("remote URL has no host")));
+          tracing::debug!(%url, "remote image URL has no host");
+          self.entries.insert(resource_hash, Entry::Failed);
           return;
         };
         let fetcher = Arc::clone(&cx.global::<Fetcher>().0);

@@ -13,9 +13,9 @@ JSON, JSONC, and JSON5 documents complete from a JSON Schema: properties at the 
 ## Stack
 
 - `jsonc-parser` 0.34.0, MIT. Features `serde` and `serde_json`. `parse_to_ast` for source ranges.
-- `jsonschema` 0.58.5, MIT. `default-features = false` (defaults pull reqwest and aws-lc-rs). Build with `.offline()` / an in-memory registry after OpenIt has the bytes.
+- `jsonschema` 0.60.2, MIT. `default-features = false` (defaults pull reqwest and aws-lc-rs). Build with `.offline()` / an in-memory registry after OpenIt has the bytes.
 - Existing `Fetcher`, `ResourceCache`, and `PermissionRequests` for remote schema documents. Not jsonschema's HTTP client.
-- gpui-base 0.7.0 `EditorState::diagnostics_mut`, `DiagnosticSet::push`, `Lsp.completion_provider` (`CompletionProvider`). No language-server process.
+- gpui-base 0.8.1 `EditorState::diagnostics_mut`, `DiagnosticSet::push`, `Lsp.completion_provider` (`CompletionProvider`), and the `ShowCompletions` action bound to Ctrl+Space in the editor. No language-server process.
 - SchemaStore catalog index (`fileMatch` + `url`), bundled. Schema documents are not bundled; jsonschema already embeds draft meta-schemas.
 
 ## Decisions
@@ -48,7 +48,7 @@ Stop and report: `jsonschema` or `jsonc-parser` failing `cargo deny` or not buil
 - New GPUI-free module in `crates/core`.
 - `.json`: every `jsonc_parser::ParseOptions` flag false.
 - `.jsonc` and `.json5`: comments and trailing commas only.
-- A successful parse returns a `serde_json::Value` and a JSON-pointer to source-range map. A syntax error returns a range covering the bad token.
+- A successful parse returns a `serde_json::Value` and JSON-pointer to source-range maps: `ParsedJson.ranges` for instances (object members span name through value), and `ParsedJson.key_ranges` for member keys only. A syntax error returns a range covering the bad token.
 - Does not rewrite the document.
 - Done when:
   - `just task openit-core`: green
@@ -72,7 +72,8 @@ Stop and report: `jsonschema` or `jsonc-parser` failing `cargo deny` or not buil
 
 - After: 1
 - `jsonschema` 0.56.0, `default-features = false`, `.offline()` / in-memory registry. No HTTP from this crate.
-- Map `instance_path` through item 1's pointer map onto source ranges. A path with no range still yields a diagnostic at the document root.
+- Local schema documents enter the registry under their `file:` URL, so a path with spaces or other characters a URI cannot hold still compiles, and relative `$ref`s resolve against it. A schema that fails to compile logs a warning and validates nothing.
+- Map `instance_path` through item 1's pointer map onto source ranges. A path with no range still yields a diagnostic at the document root. `additionalProperties` and `unevaluatedProperties` failures produce one diagnostic per offending key, covering that key only, with `Property "name" is not allowed`; a missing key range falls back to the instance range. The root `$schema` key is exempt from these two failures; a nested `$schema` is not.
 - A `$ref` present in the registry validates. A missing `$ref` does not validate. Depth 9 does not validate.
 - Compiled validators are reused until the schema identity (root URL or path plus digest of loaded documents) changes.
 - Done when:
@@ -131,9 +132,10 @@ Stop and report: `jsonschema` or `jsonc-parser` failing `cargo deny` or not buil
 
 - After: 5
 - Install `CompletionProvider` on the document's `EditorState`. No language-server process.
-- Offers properties at the cursor, including nested object properties, and `enum` values, from the loaded schema. Follow `$ref` already in the registry.
+- Offers properties at the cursor, including nested object properties, and `enum` values, from the loaded schema. Follow `$ref` already in the registry. Property suggestions exclude sibling keys already present before or after the caret, but keep the key under or touching the caret; keys in nested objects do not exclude outer properties.
 - No schema loaded: this provider returns no items.
-- No snippets.
+- The menu opens while typing `"`, `:`, `_`, `$`, or an ASCII letter or digit, and on demand with Ctrl+Space (`ShowCompletions`). `{`, `,`, and `[` do not trigger it.
+- No snippets. Property completion replaces the token with `"name": `, including a trailing space; if a colon already follows the replaced token, it inserts only `"name"`.
 - Done when:
   - `just task openit`: green
   - with a loaded schema: the completion menu offers properties at the cursor and `enum` values
@@ -144,7 +146,7 @@ Stop and report: `jsonschema` or `jsonc-parser` failing `cargo deny` or not buil
 
 - After: 4, 6
 - Status name click opens the schema picker in `DocumentView`'s existing `Overlay` slot (same as the language picker).
-- The picker lists catalog names plus a way to choose a local file or URL. Automatic clears the manual pick.
+- The picker labels catalog entries by their first file pattern, stripping a leading `**/` and falling back to the URL file name when there is no pattern, plus a way to choose a local file or URL. Search ranks exact label, label prefix, label substring, other file patterns, then URL; a matching label span is bold. The current schema is preselected, scrolled into view, and marked "(current)". Automatic clears the manual pick. Escape closes even with a query typed.
 - An ambiguous catalog match opens the picker.
 - Persist the manual pick on the draft and in settings keyed by canonical path. Next open of that path uses it. A recovered draft restores it.
 - Done when:

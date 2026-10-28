@@ -539,6 +539,9 @@ fn open_recovery_store() -> Option<Arc<RecoveryStore>> {
     },
   }
 }
+/// Key context of a focused Markdown preview, minus any text field, find bar or dialog inside it.
+const PREVIEW_KEYS: &str = "MarkdownPreview && !Input && !FindBar && !Dialog";
+
 /// Install every key binding. Image and PDF shortcuts are scoped to their own
 /// window, where `cmd-r`, `cmd-l`, and `cmd-f` cannot collide with a text action.
 fn bind_keys(cx: &mut App) {
@@ -604,6 +607,16 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("ctrl-g", actions::NextMatch, Some("DocumentView")),
     KeyBinding::new("cmd-shift-g", actions::PreviousMatch, Some("DocumentView")),
     KeyBinding::new("ctrl-shift-g", actions::PreviousMatch, Some("DocumentView")),
+    KeyBinding::new("cmd-d", actions::SelectNextOccurrence, Some("Input && mode == editor")),
+    KeyBinding::new("ctrl-d", actions::SelectNextOccurrence, Some("Input && mode == editor")),
+    // From the editor's find bar: select the current match and go back to the text.
+    KeyBinding::new("cmd-d", actions::SelectNextOccurrence, Some("FindBar")),
+    KeyBinding::new("ctrl-d", actions::SelectNextOccurrence, Some("FindBar")),
+    KeyBinding::new(
+      "ctrl-space",
+      gpui_kit::component::input::ShowCompletions,
+      Some("Input && mode == editor"),
+    ),
     KeyBinding::new("alt-cmd-g", actions::GoToPage, Some("PdfView")),
     KeyBinding::new("alt-ctrl-g", actions::GoToPage, Some("PdfView")),
     KeyBinding::new("cmd-g", actions::NextMatch, Some("FindBar")),
@@ -624,6 +637,28 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("end", actions::LastPage, Some("PdfView")),
     KeyBinding::new("enter", actions::NextMatch, Some("FindBar")),
     KeyBinding::new("shift-enter", actions::PreviousMatch, Some("FindBar")),
+    KeyBinding::new("enter", actions::ReplaceMatch, Some("FindReplace")),
+    KeyBinding::new("cmd-enter", actions::ReplaceAllMatches, Some("FindReplace")),
+    KeyBinding::new("ctrl-enter", actions::ReplaceAllMatches, Some("FindReplace")),
+  ]);
+  bind_preview_keys(cx);
+}
+
+/// The Markdown preview scrolls from the keyboard unless a text field or a dialog holds the keys.
+fn bind_preview_keys(cx: &mut App) {
+  cx.bind_keys([
+    KeyBinding::new("up", actions::PreviewLineUp, Some(PREVIEW_KEYS)),
+    KeyBinding::new("down", actions::PreviewLineDown, Some(PREVIEW_KEYS)),
+    KeyBinding::new("pageup", actions::PreviewPageUp, Some(PREVIEW_KEYS)),
+    KeyBinding::new("pagedown", actions::PreviewPageDown, Some(PREVIEW_KEYS)),
+    KeyBinding::new("shift-space", actions::PreviewPageUp, Some(PREVIEW_KEYS)),
+    KeyBinding::new("space", actions::PreviewPageDown, Some(PREVIEW_KEYS)),
+    KeyBinding::new("home", actions::PreviewTop, Some(PREVIEW_KEYS)),
+    KeyBinding::new("end", actions::PreviewBottom, Some(PREVIEW_KEYS)),
+    KeyBinding::new("cmd-up", actions::PreviewTop, Some(PREVIEW_KEYS)),
+    KeyBinding::new("cmd-down", actions::PreviewBottom, Some(PREVIEW_KEYS)),
+    KeyBinding::new("ctrl-home", actions::PreviewTop, Some(PREVIEW_KEYS)),
+    KeyBinding::new("ctrl-end", actions::PreviewBottom, Some(PREVIEW_KEYS)),
   ]);
 }
 

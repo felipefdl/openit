@@ -1,6 +1,6 @@
 //! The empty window: a waiting surface that an open request fills in place.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Paste;
 use gpui_kit::component::{ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::{InteractiveElement as _, Styled as _};
@@ -234,7 +234,7 @@ impl Render for EmptyView {
           )
           .child(
             Button::new("select-file")
-              .ghost()
+              .outline()
               .label("Select a file")
               .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(OpenFile), cx))),
           )

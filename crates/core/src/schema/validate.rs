@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use jsonschema::Registry;
+use jsonschema::{Registry, error::ValidationErrorKind};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use url::Url;
@@ -109,17 +109,29 @@ impl CompiledSchema {
   /// A path with no range uses the document root.
   pub fn validate(&self, parsed: &ParsedJson) -> Vec<SchemaDiagnostic> {
     let root = parsed.range("").unwrap_or(SourceRange { start: 0, end: 0 });
-    self
-      .validator
-      .iter_errors(&parsed.value)
-      .map(|error| {
-        let pointer = error.instance_path().as_str();
-        SchemaDiagnostic {
-          range: parsed.range(pointer).unwrap_or(root),
-          message: error.to_string(),
-        }
-      })
-      .collect()
+    let mut diagnostics = Vec::new();
+    for error in self.validator.iter_errors(&parsed.value) {
+      let pointer = error.instance_path().as_str();
+      let range = parsed.range(pointer).unwrap_or(root);
+      match error.kind() {
+        ValidationErrorKind::AdditionalProperties { unexpected }
+        | ValidationErrorKind::UnevaluatedProperties { unexpected } => {
+          for name in unexpected {
+            // The root `$schema` key is how the document declares its schema.
+            if pointer.is_empty() && name == "$schema" {
+              continue;
+            }
+            let key = super::append_pointer(pointer, name);
+            diagnostics.push(SchemaDiagnostic {
+              range: parsed.key_ranges.get(&key).copied().unwrap_or(range),
+              message: format!("Property \"{name}\" is not allowed"),
+            });
+          }
+        },
+        _ => diagnostics.push(SchemaDiagnostic { range, message: error.to_string() }),
+      }
+    }
+    diagnostics
   }
 }
 
@@ -336,11 +348,46 @@ mod tests {
     let parsed = ParsedJson {
       value: json!({ "n": 1 }),
       ranges: BTreeMap::from([(String::new(), SourceRange { start: 0, end: 9 })]),
+      key_ranges: BTreeMap::new(),
     };
     let compiled = compile(json!({ "type": "object", "properties": { "n": { "minimum": 5 } } }), &[]);
     let issues = compiled.validate(&parsed);
     let issue = issues.first().expect("issue");
     assert_eq!(issue.range, SourceRange { start: 0, end: 9 });
+  }
+
+  #[test]
+  fn additional_properties_report_each_key_and_exempt_root_schema() {
+    let text = "{\"$schema\": \"./s.json\", \"title\": \"x\", \"unknown\": 1, \"other\": 2}";
+    let parsed = parse(JsonFamily::Json, text).expect("json");
+    let compiled = compile(
+      json!({ "type": "object", "properties": { "title": { "type": "string" } }, "additionalProperties": false }),
+      &[],
+    );
+    let issues = compiled.validate(&parsed);
+    let mut covered: Vec<(usize, &str)> = issues
+      .iter()
+      .map(|issue| (issue.range.start, text.get(issue.range.start..issue.range.end).expect("range")))
+      .collect();
+    covered.sort_unstable();
+    let names: Vec<&str> = covered.iter().map(|(_, name)| *name).collect();
+    assert_eq!(names, ["\"unknown\"", "\"other\""], "{issues:?}");
+    assert!(
+      issues
+        .iter()
+        .any(|issue| issue.message == "Property \"unknown\" is not allowed")
+    );
+  }
+
+  #[test]
+  fn nested_schema_key_is_not_exempt() {
+    let text = "{\"a\": {\"$schema\": 1}}";
+    let parsed = parse(JsonFamily::Json, text).expect("json");
+    let compiled = compile(
+      json!({ "properties": { "a": { "type": "object", "additionalProperties": false } } }),
+      &[],
+    );
+    assert_eq!(compiled.validate(&parsed).len(), 1);
   }
 
   #[test]

@@ -83,6 +83,12 @@ pub struct DocumentSession {
   pub(crate) observed_disk: Option<Fingerprint>,
   pub(crate) source_missing: bool,
   pub(crate) suppress_next_change: bool,
+  /// The text the buffer had when it last matched the file: loaded, reloaded or
+  /// saved. `None` for a restored draft, whose baseline was not loaded. Lets an
+  /// undo back to this text clear the dirty marker.
+  pub(crate) saved_text: Option<Rope>,
+  /// Reopened from a recovered draft rather than opened from its file.
+  pub(crate) restored: bool,
   pub(crate) external_change: bool,
 }
 impl DocumentSession {
@@ -130,10 +136,14 @@ impl DocumentSession {
       observed_disk: disk,
       source_missing: false,
       suppress_next_change: false,
+      saved_text: None,
+      restored: false,
       external_change: false,
     }
   }
   pub(crate) fn restore_state(&mut self) {
+    self.restored = true;
+    self.saved_text = None;
     let current_disk = Fingerprint::of(&self.path).ok();
     let has_path = self.has_path();
     self.observed_disk = current_disk;
@@ -147,6 +157,15 @@ impl DocumentSession {
       .path
       .file_name()
       .map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned())
+  }
+  /// What the unsaved-changes prompt says Discard does. A draft recovered from
+  /// an earlier run goes with the buffer; otherwise only the edits are lost.
+  pub(crate) const fn close_prompt_detail(&self) -> &'static str {
+    if self.restored {
+      "Discard removes the recovered draft as well."
+    } else {
+      "Your changes will be lost if you don't save them."
+    }
   }
   pub(crate) fn is_dirty(&self) -> bool {
     self.revision != self.saved_revision
@@ -431,6 +450,7 @@ impl DocumentSession {
       return;
     };
     self.saving = true;
+    let written = snapshot.text.clone();
     self.save_failed = false;
     let path = self.path.clone();
     let expected_disk = self.disk;
@@ -449,7 +469,10 @@ impl DocumentSession {
       let _ = entity.update(&mut app, |view, cx| {
         view.session.saving = false;
         match result {
-          SaveOutcome::Saved(saved) => Self::complete_save_result(view, saved, cx),
+          SaveOutcome::Saved(saved) => {
+            view.session.saved_text = Some(written);
+            Self::complete_save_result(view, saved, cx);
+          },
           SaveOutcome::Conflict => {
             view.session.external_change = true;
             view.session.source_missing = !view.session.path.exists();
@@ -633,19 +656,21 @@ impl DocumentSession {
       }
     };
     if let Some(loaded) = loaded {
-      Self::replace_buffer(view, loaded.text, window, cx);
+      Self::replace_buffer(view, &loaded.text, window, cx);
     }
   }
   pub(crate) fn replace_buffer(
     view: &mut DocumentView,
-    text: String,
+    text: &str,
     window: &mut Window,
     cx: &mut Context<DocumentView>,
   ) {
     view.session.suppress_next_change = view.editor.is_some();
+    let rope = Rope::from(text);
+    view.session.saved_text = Some(rope.clone());
     match &view.editor {
-      Some(editor) => editor.update(cx, |state, cx| state.replace_all(&text, window, cx)),
-      None => view.initial_text = Some(Rope::from(text)),
+      Some(editor) => editor.update(cx, |state, cx| state.replace_all(text, window, cx)),
+      None => view.initial_text = Some(rope),
     }
     view.session.mark_replaced();
     view.invalidate_preview();

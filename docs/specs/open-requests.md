@@ -11,9 +11,9 @@ Every way a file reaches OpenIt ends in the same place: the `openit` and `oi` co
 
 ## Stack
 
-- `interprocess` 2.4.4, default features: Unix domain socket on macOS and Linux, named pipe on Windows, one API. std has no named pipes. License `0BSD OR Apache-2.0`, both in `deny.toml`.
+- `interprocess` 2.4.7, default features: Unix domain socket on macOS and Linux, named pipe on Windows, one API. std has no named pipes. License `0BSD OR Apache-2.0`, both in `deny.toml`.
 - `serde_json` (already a dependency) for the one-line request.
-- gpui-pre 0.3.7 `ExternalPaths` with `on_drop`, `App::on_open_urls`, `App::on_reopen`. The test platform panics on the last two, so both sit behind a seam the tests drive, like `handoff::SystemOpener`.
+- gpui-pre 0.3.10 `ExternalPaths` with `on_drop`, `App::on_open_urls`, `App::on_reopen`. The test platform panics on the last two, so both sit behind a seam the tests drive, like `handoff::SystemOpener`.
 - gpui 0.2.2 `Window::replace_root` for filling the empty window in place, as `replace_document` already does.
 - cargo-packager 0.11.8 `[[package.metadata.packager.file-associations]]` for the macOS document types, the Windows "Open with" list, and the Linux `.desktop` MIME entries.
 - Installer logic for command-line symlinks, elevation (`osascript ... with administrator privileges`, `pkexec`), and a Windows shim plus user PATH entry.
@@ -67,13 +67,13 @@ Stop and report: `interprocess` failing `cargo deny` or not building on one of t
 
 ### 3. The empty window and reopen
 
-- A fourth root view beside `DocumentView`, `ImageView`, and `PdfView`; the window helpers dispatch on it. A launch with no paths and no drafts opens one. Layout, centered in the window: `assets/brand/openit-glyph.svg` at 80 px in `ActivePalette.mark` at 0.6 opacity (already embedded), a ghost `Button` labeled "Select a file" that dispatches `OpenFile`, and one muted 12 px line under it reading "or drag and drop a file, or paste". No status bar. Title "OpenIt", no dirty marker. Everything else in the window stays quiet.
+- A fourth root view beside `DocumentView`, `ImageView`, and `PdfView`; the window helpers dispatch on it. A launch with no paths and no drafts opens one. Layout, centered in the window: `assets/brand/openit-glyph.svg` at 80 px in `ActivePalette.mark` at 0.6 opacity (already embedded), an outline `Button` labeled "Select a file", visible at rest, that dispatches `OpenFile`, and one muted 12 px line under it reading "or drag and drop a file, or paste". No status bar. Title "OpenIt", no dirty marker. Everything else in the window stays quiet.
 - Filling: the first path of any open request replaces this window's root through `Window::replace_root` (the `replace_document` path), keeping the window handle; remaining paths open new windows. Cmd/Ctrl+N or Cmd/Ctrl+V with clipboard content fills it the same way.
 - `on_reopen` (behind the seam) with zero windows opens an empty window; with windows open it does nothing. Close Window closes it; it never writes a draft.
 - After: 2
 - Done when:
   - GPUI tests: a launch with no paths and no drafts yields one empty window; an open request fills it (same window handle, root is now the document view) and a second request opens a new window; the button dispatches `OpenFile`; the reopen seam with zero windows opens one.
-  - Manual: the window shows the mark, the ghost button, the line under it, and no status bar.
+  - Manual: the window shows the mark, the outline button, the line under it, and no status bar.
 
 ### 4. Drop on a window
 
@@ -96,7 +96,7 @@ Stop and report: `interprocess` failing `cargo deny` or not building on one of t
 
 ### 6. Command installation
 
-- macOS: `OpenIt > Install Command Line Tools...` opens a dedicated window, about 420 x 260, not resizable, with two checkbox rows, each followed by its example in a mono muted line (`openit file.md`, `oi file.md`), a status line, Cancel, and Apply. The boxes open showing installed state; when neither is installed both are checked. Apply is disabled until a box differs from the installed state. Apply creates or removes `/usr/local/bin/openit` and `/usr/local/bin/oi` to match: directly when the directory is writable, else through the administrator prompt. Success: rows show the new state, status line "Open a new terminal to use them." A failure names the cause in the same line; a cancelled prompt shows nothing. Escape and Cancel close the window. The menu item and the window are registered on macOS only.
+- macOS: `OpenIt > Install Command Line Tools...` opens a dedicated window, about 420 x 340, not resizable, with the application's title bar and an explanation of the command links, their `/usr/local/bin` location, their resolved executable target when available, and the administrator prompt. Two checkbox rows are each followed by their example in a mono muted line (`openit file.md`, `oi file.md`), then a status line, Cancel, and Apply. The boxes open showing installed state; when neither is installed both are checked. Apply is disabled until a box differs from the installed state. Apply creates or removes `/usr/local/bin/openit` and `/usr/local/bin/oi` to match: directly when the directory is writable, else through the administrator prompt. Success: rows show the new state, status line "Open a new terminal to use them." A failure names the cause in the same line; a cancelled administrator prompt says "Administrator access was not granted. Nothing was changed." Escape and Cancel close the window. The menu item and the window are registered on macOS only.
 - Link target: `std::env::current_exe()` resolved through symlinks. The same resolver prefers `$APPIMAGE` when set, so the shared install code never links into an AppImage mount.
 - Linux `.deb`: ships `openit` and `oi` in `/usr/bin` as two-line `exec /usr/bin/OpenIt "$@"` scripts through the packager `files` map. Windows NSIS: `[package.metadata.packager.nsis] preinstall-section` is injected NSIS (not a replacement of `installer.nsi`). It contains an install `Section` and an `un.` uninstall `Section`. Install creates `$INSTDIR\bin` (`$LOCALAPPDATA\OpenIt\bin` in current-user mode), writes `openit.cmd` and `oi.cmd` that invoke `"%~dp0..\${MAINBINARYNAME}.exe" %*`, appends that directory to `HKCU\Environment` Path when missing, and broadcasts `WM_SETTINGCHANGE`. Uninstall deletes the two cmd files, removes the directory from Path, and broadcasts again.
 - After: 2

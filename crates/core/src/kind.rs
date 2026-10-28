@@ -198,6 +198,83 @@ fn by_extension(ext: &str) -> DocumentKind {
   DocumentKind::Text { language: None }
 }
 
+/// Evidence needed before clipboard text counts as Markdown.
+const MARKDOWN_THRESHOLD: u32 = 2;
+
+/// Decide the kind of text that has no file name, such as the clipboard: a
+/// JSON object or array opens as JSON, clear Markdown as Markdown, anything
+/// else as plain text.
+pub fn sniff_text(text: &str) -> DocumentKind {
+  let trimmed = text.trim();
+  if is_json_container(trimmed) {
+    return DocumentKind::Text { language: Some("json") };
+  }
+  if markdown_score(trimmed) >= MARKDOWN_THRESHOLD {
+    return DocumentKind::Markdown;
+  }
+  DocumentKind::Text { language: None }
+}
+
+/// Whether `text` is one JSON object or array, and nothing else.
+fn is_json_container(text: &str) -> bool {
+  let wrapped = (text.starts_with('{') && text.ends_with('}')) || (text.starts_with('[') && text.ends_with(']'));
+  wrapped && serde_json::from_str::<serde_json::Value>(text).is_ok()
+}
+
+/// How much of `text` is Markdown syntax that plain prose rarely contains.
+/// Fences and tables count double; headings, lists, quotes, links, and bold
+/// count once, so a lone `# comment` line stays plain text.
+fn markdown_score(text: &str) -> u32 {
+  let (mut heading, mut fence, mut table, mut quote) = (false, false, false, false);
+  let mut list_items = 0_u32;
+  for line in text.lines().map(str::trim_start) {
+    if line.starts_with("```") || line.starts_with("~~~") {
+      fence = true;
+    } else if is_heading(line) {
+      heading = true;
+    } else if is_list_item(line) {
+      list_items += 1;
+    } else if line.starts_with("> ") {
+      quote = true;
+    } else if is_table_rule(line) {
+      table = true;
+    }
+  }
+  let link = text.contains('[') && text.contains("](");
+  let bold = text.matches("**").nth(1).is_some();
+  let weights = [
+    (fence, 2),
+    (table, 2),
+    (heading, 1),
+    (list_items >= 2, 1),
+    (quote, 1),
+    (link, 1),
+    (bold, 1),
+  ];
+  weights.iter().filter(|(present, _)| *present).map(|(_, weight)| weight).sum()
+}
+
+/// An ATX heading: one to six `#` and a space.
+fn is_heading(line: &str) -> bool {
+  let rest = line.trim_start_matches('#');
+  let hashes = line.len() - rest.len();
+  (1..=6).contains(&hashes) && rest.starts_with(' ')
+}
+
+/// A bullet or numbered list item.
+fn is_list_item(line: &str) -> bool {
+  if ["- ", "* ", "+ "].iter().any(|marker| line.starts_with(marker)) {
+    return true;
+  }
+  let rest = line.trim_start_matches(|ch: char| ch.is_ascii_digit());
+  rest.len() < line.len() && rest.starts_with(". ")
+}
+
+/// The `| --- | --- |` rule row of a table.
+fn is_table_rule(line: &str) -> bool {
+  line.contains('|') && line.contains("--") && line.chars().all(|ch| matches!(ch, '|' | '-' | ':' | ' ' | '\t'))
+}
+
 #[cfg(test)]
 mod tests {
   use std::path::Path;
@@ -308,5 +385,25 @@ mod tests {
     assert_eq!(DocumentKind::Svg.language(), None);
     assert_eq!(DocumentKind::Pdf.language(), None);
     assert_eq!(DocumentKind::Unsupported.language(), None);
+  }
+
+  #[test]
+  fn clipboard_json_opens_as_json() {
+    assert_eq!(super::sniff_text("{\"a\": 1}\n"), DocumentKind::Text { language: Some("json") });
+    assert_eq!(super::sniff_text(" [1, 2, 3] "), DocumentKind::Text { language: Some("json") });
+    assert_eq!(super::sniff_text("{not json}"), DocumentKind::Text { language: None });
+  }
+
+  #[test]
+  fn clipboard_markdown_needs_more_than_one_hint() {
+    let note = "# Clip title\n\nSome **markdown** text\n\n- a\n- b";
+    assert_eq!(super::sniff_text(note), DocumentKind::Markdown);
+    assert_eq!(super::sniff_text("```rust\nlet x = 1;\n```"), DocumentKind::Markdown);
+    assert_eq!(
+      super::sniff_text("# just a shell comment\nls"),
+      DocumentKind::Text { language: None }
+    );
+    assert_eq!(super::sniff_text("[link](x)"), DocumentKind::Text { language: None });
+    assert_eq!(super::sniff_text("plain words"), DocumentKind::Text { language: None });
   }
 }

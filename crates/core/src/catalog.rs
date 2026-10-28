@@ -3,7 +3,7 @@
 //! The binary embeds `fileMatch` plus `url` only. Schema documents are not
 //! bundled. Matching is in-process; this module does not touch the network.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -24,13 +24,18 @@ pub enum CatalogMatch {
   None,
 }
 
-/// A catalog schema the picker can offer, named from the URL file.
+/// A catalog schema the picker can offer.
+///
+/// The bundled index carries no titles, so the label is the first file pattern the schema
+/// applies to (`package.json`), falling back to the URL file name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogSchema {
-  /// File name taken from the schema URL, used as the picker label.
+  /// Picker label.
   pub name: String,
   /// Schema document URL.
   pub url: String,
+  /// Every file pattern the catalog applies this schema to, used for search.
+  pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,23 +60,45 @@ fn entries() -> &'static [CatalogEntry] {
 pub fn schemas() -> &'static [CatalogSchema] {
   static SCHEMAS: OnceLock<Vec<CatalogSchema>> = OnceLock::new();
   SCHEMAS.get_or_init(|| {
-    let mut seen = HashSet::new();
-    let mut schemas = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    let mut schemas: Vec<CatalogSchema> = Vec::new();
     for entry in entries() {
-      if !seen.insert(entry.url.as_str()) {
+      let patterns = entry.file_match.iter().map(|pattern| clean_pattern(pattern));
+      if let Some(&at) = index.get(entry.url.as_str()) {
+        if let Some(schema) = schemas.get_mut(at) {
+          for pattern in patterns {
+            if !schema.patterns.contains(&pattern) {
+              schema.patterns.push(pattern);
+            }
+          }
+        }
         continue;
       }
+      index.insert(entry.url.as_str(), schemas.len());
+      let patterns: Vec<String> = patterns.collect();
       schemas.push(CatalogSchema {
-        name: display_name(&entry.url),
+        name: patterns.first().cloned().unwrap_or_else(|| url_file_name(&entry.url)),
         url: entry.url.clone(),
+        patterns,
       });
     }
-    schemas.sort_by(|left, right| left.name.cmp(&right.name).then(left.url.cmp(&right.url)));
+    schemas.sort_by(|left, right| {
+      left
+        .name
+        .to_lowercase()
+        .cmp(&right.name.to_lowercase())
+        .then(left.url.cmp(&right.url))
+    });
     schemas
   })
 }
 
-fn display_name(url: &str) -> String {
+/// A `fileMatch` pattern without the redundant leading `**/`.
+fn clean_pattern(pattern: &str) -> String {
+  pattern.strip_prefix("**/").unwrap_or(pattern).to_owned()
+}
+
+fn url_file_name(url: &str) -> String {
   url
     .rsplit('/')
     .find(|part| !part.is_empty())

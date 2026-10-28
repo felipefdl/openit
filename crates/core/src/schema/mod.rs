@@ -71,6 +71,8 @@ pub struct ParsedJson {
   ///
   /// Object members use the property span (name through value).
   pub ranges: BTreeMap<String, SourceRange>,
+  /// JSON Pointer to the source range of an object member's key, name only.
+  pub key_ranges: BTreeMap<String, SourceRange>,
 }
 
 impl ParsedJson {
@@ -103,8 +105,9 @@ pub fn parse(family: JsonFamily, text: &str) -> Result<ParsedJson, SyntaxError> 
     });
   };
   let mut ranges = BTreeMap::new();
-  let value = collect(&root, "", source_range(root.range()), &mut ranges)?;
-  Ok(ParsedJson { value, ranges })
+  let mut key_ranges = BTreeMap::new();
+  let value = collect(&root, "", source_range(root.range()), &mut ranges, &mut key_ranges)?;
+  Ok(ParsedJson { value, ranges, key_ranges })
 }
 
 const fn parse_options(family: JsonFamily) -> ParseOptions {
@@ -141,6 +144,7 @@ fn collect(
   pointer: &str,
   range: SourceRange,
   ranges: &mut BTreeMap<String, SourceRange>,
+  key_ranges: &mut BTreeMap<String, SourceRange>,
 ) -> Result<serde_json::Value, SyntaxError> {
   ranges.insert(pointer.to_owned(), range);
   match value {
@@ -159,7 +163,12 @@ fn collect(
       for property in &object.properties {
         let name = property.name.as_str();
         let child = append_pointer(pointer, name);
-        let child_value = collect(&property.value, &child, source_range(property.range), ranges)?;
+        let key_range = match &property.name {
+          jsonc_parser::ast::ObjectPropName::String(lit) => lit.range,
+          jsonc_parser::ast::ObjectPropName::Word(lit) => lit.range,
+        };
+        key_ranges.insert(child.clone(), source_range(key_range));
+        let child_value = collect(&property.value, &child, source_range(property.range), ranges, key_ranges)?;
         map.insert(name.to_owned(), child_value);
       }
       Ok(serde_json::Value::Object(map))
@@ -168,7 +177,7 @@ fn collect(
       let mut elements = Vec::with_capacity(array.elements.len());
       for (index, element) in array.elements.iter().enumerate() {
         let child = append_pointer(pointer, &index.to_string());
-        elements.push(collect(element, &child, source_range(element.range()), ranges)?);
+        elements.push(collect(element, &child, source_range(element.range()), ranges, key_ranges)?);
       }
       Ok(serde_json::Value::Array(elements))
     },

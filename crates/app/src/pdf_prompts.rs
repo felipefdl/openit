@@ -143,13 +143,14 @@ impl GoToPage {
     self.input.update(cx, |state, cx| state.focus(window, cx));
   }
 
-  /// Parse a one-based page number into a zero-based index inside the document.
+  /// Parse a one-based page number into a zero-based index, or `None` when it
+  /// is not a page of the document.
   pub fn parse(text: &str, page_count: usize) -> Option<usize> {
     let page: usize = text.trim().parse().ok()?;
-    if page == 0 || page_count == 0 {
+    if page == 0 || page > page_count {
       return None;
     }
-    Some(page.min(page_count).saturating_sub(1))
+    Some(page.saturating_sub(1))
   }
 
   fn confirm(&self, cx: &mut Context<Self>) {
@@ -165,14 +166,19 @@ impl Render for GoToPage {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let palette = cx.global::<ActivePalette>().0;
     let text = self.input.read(cx).value();
-    let hint: SharedString = if text.trim().is_empty() || Self::parse(&text, self.page_count).is_some() {
+    let valid = text.trim().is_empty() || Self::parse(&text, self.page_count).is_some();
+    let hint: SharedString = if valid {
       format!("Page {} of {}", self.current.saturating_add(1), self.page_count).into()
     } else {
       format!("Type a page between 1 and {}", self.page_count).into()
     };
     let input = Input::new(&self.input).bordered(false);
     let border = hsla(palette.border);
-    let muted = hsla(palette.muted_foreground);
+    let muted = if valid {
+      hsla(palette.muted_foreground)
+    } else {
+      cx.theme().danger
+    };
     overlay_frame(
       "pdf-goto-page-backdrop",
       &palette,
@@ -199,10 +205,12 @@ mod tests {
   use super::GoToPage;
 
   #[core::prelude::v1::test]
-  fn parse_clamps_to_the_document() {
+  fn parse_rejects_pages_outside_the_document() {
     assert_eq!(GoToPage::parse("1", 10), Some(0));
     assert_eq!(GoToPage::parse(" 7 ", 10), Some(6));
-    assert_eq!(GoToPage::parse("99", 10), Some(9));
+    assert_eq!(GoToPage::parse("10", 10), Some(9));
+    assert_eq!(GoToPage::parse("11", 10), None);
+    assert_eq!(GoToPage::parse("99", 10), None);
     assert_eq!(GoToPage::parse("0", 10), None);
     assert_eq!(GoToPage::parse("x", 10), None);
     assert_eq!(GoToPage::parse("1", 0), None);

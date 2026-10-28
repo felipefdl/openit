@@ -48,7 +48,7 @@ pub fn completions(
     return Vec::new();
   };
   match cursor.slot {
-    Slot::Property => property_items(documents, &cursor.path, cursor.replace),
+    Slot::Property => property_items(documents, text, &cursor),
     Slot::Value => enum_items(documents, &cursor.path, cursor.replace),
   }
 }
@@ -128,12 +128,20 @@ struct Cursor {
   path: Vec<String>,
   slot: Slot,
   replace: SourceRange,
+  /// Offset of the `{` that opens the object being completed (property slots).
+  object_start: Option<usize>,
 }
 
-fn property_items(documents: &SchemaDocuments, path: &[String], replace: SourceRange) -> Vec<SchemaCompletion> {
-  let Some(schema) = schema_at(documents, path) else {
+fn property_items(documents: &SchemaDocuments, text: &str, cursor: &Cursor) -> Vec<SchemaCompletion> {
+  let Some(schema) = schema_at(documents, &cursor.path) else {
     return Vec::new();
   };
+  let replace = cursor.replace;
+  let present = cursor
+    .object_start
+    .map(|start| sibling_keys(text, start, replace))
+    .unwrap_or_default();
+  let colon_follows = text.get(replace.end..).is_some_and(|rest| rest.trim_start().starts_with(':'));
   let mut names = BTreeSet::new();
   let mut items = Vec::new();
   for node in flatten(documents, schema) {
@@ -141,19 +149,71 @@ fn property_items(documents: &SchemaDocuments, path: &[String], replace: SourceR
       continue;
     };
     for (name, child) in properties {
-      if !names.insert(name.clone()) {
+      if present.contains(name) || !names.insert(name.clone()) {
         continue;
       }
+      let key = json_string(name);
       items.push(SchemaCompletion {
         label: name.clone(),
         detail: type_detail(BoundSchema { base: node.base, value: child }),
         kind: CompletionKind::Property,
         replace,
-        insert: json_string(name),
+        insert: if colon_follows {
+          key
+        } else {
+          format!("{key}: ")
+        },
       });
     }
   }
   items
+}
+
+/// Keys already present in the object opened at `start`, except the key the
+/// caret is in or touching (the one being typed).
+fn sibling_keys(text: &str, start: usize, replace: SourceRange) -> BTreeSet<String> {
+  let mut keys = BTreeSet::new();
+  let Some(tail) = text.get(start..) else {
+    return keys;
+  };
+  let mut scanner = Scanner::new(tail, &SCANNER_OPTIONS);
+  let mut depth: u32 = 0;
+  let mut expect_key = false;
+  while let Ok(Some(token)) = scanner.scan() {
+    let (token_start, token_end) = (scanner.token_start() + start, scanner.token_end() + start);
+    match token {
+      Token::OpenBrace => {
+        depth = depth.saturating_add(1);
+        expect_key = depth == 1;
+      },
+      Token::OpenBracket => {
+        depth = depth.saturating_add(1);
+        expect_key = false;
+      },
+      Token::CloseBrace | Token::CloseBracket => {
+        depth = depth.saturating_sub(1);
+        expect_key = false;
+        if depth == 0 {
+          break;
+        }
+      },
+      Token::Comma => expect_key = depth == 1,
+      Token::Colon => expect_key = false,
+      Token::String(_) | Token::Word(_) if depth == 1 && expect_key => {
+        expect_key = false;
+        let touches_caret = token_start <= replace.end && replace.start <= token_end;
+        if !touches_caret {
+          match token {
+            Token::String(value) => keys.insert(value.into_owned()),
+            Token::Word(value) => keys.insert(value.to_owned()),
+            _ => false,
+          };
+        }
+      },
+      _ => {},
+    }
+  }
+  keys
 }
 
 #[derive(Clone, Copy)]
@@ -377,6 +437,8 @@ struct Frame {
   expect: Expect,
   key: Option<String>,
   segment: Option<String>,
+  /// Offset of the opening `{` or `[`.
+  start: usize,
 }
 
 enum FrameKind {
@@ -414,15 +476,12 @@ impl Walker<'_> {
     }
     let replace = SourceRange { start, end: self.offset };
     match self.top_expect() {
-      Some(Expect::Key | Expect::Colon) => Some(Cursor {
-        path: self.object_path(),
-        slot: Slot::Property,
-        replace,
-      }),
+      Some(Expect::Key | Expect::Colon) => Some(self.property_cursor(replace)),
       Some(Expect::Value) => Some(Cursor {
         path: self.value_path(),
         slot: Slot::Value,
         replace,
+        object_start: None,
       }),
       Some(Expect::AfterValue) | None => None,
     }
@@ -431,15 +490,12 @@ impl Walker<'_> {
   fn cursor_in_token(&self, token: &Token<'_>, range: SourceRange) -> Option<Cursor> {
     match token {
       Token::String(_) | Token::Word(_) => match self.top_expect() {
-        Some(Expect::Key | Expect::Colon) => Some(Cursor {
-          path: self.object_path(),
-          slot: Slot::Property,
-          replace: self.clamp_to_caret(range),
-        }),
+        Some(Expect::Key | Expect::Colon) => Some(self.property_cursor(self.clamp_to_caret(range))),
         Some(Expect::Value) => Some(Cursor {
           path: self.value_path(),
           slot: Slot::Value,
           replace: self.clamp_to_caret(range),
+          object_start: None,
         }),
         Some(Expect::AfterValue) | None => None,
       },
@@ -447,17 +503,20 @@ impl Walker<'_> {
         path: self.child_object_path(),
         slot: Slot::Property,
         replace: SourceRange { start: self.offset, end: self.offset },
+        object_start: Some(range.start),
       }),
       Token::OpenBracket | Token::Colon => Some(Cursor {
         path: self.value_path(),
         slot: Slot::Value,
         replace: SourceRange { start: self.offset, end: self.offset },
+        object_start: None,
       }),
       Token::Number(_) | Token::Boolean(_) | Token::Null => match self.top_expect() {
         Some(Expect::Value) => Some(Cursor {
           path: self.value_path(),
           slot: Slot::Value,
           replace: range,
+          object_start: None,
         }),
         _ => None,
       },
@@ -482,24 +541,30 @@ impl Walker<'_> {
   fn cursor_at_gap(&self) -> Option<Cursor> {
     let replace = SourceRange { start: self.offset, end: self.offset };
     match self.top_expect() {
-      Some(Expect::Key | Expect::Colon) => Some(Cursor {
-        path: self.object_path(),
-        slot: Slot::Property,
-        replace,
-      }),
+      Some(Expect::Key | Expect::Colon) => Some(self.property_cursor(replace)),
       Some(Expect::Value) => Some(Cursor {
         path: self.value_path(),
         slot: Slot::Value,
         replace,
+        object_start: None,
       }),
       Some(Expect::AfterValue) | None => None,
     }
   }
 
+  fn property_cursor(&self, replace: SourceRange) -> Cursor {
+    Cursor {
+      path: self.object_path(),
+      slot: Slot::Property,
+      replace,
+      object_start: self.stack.last().map(|frame| frame.start),
+    }
+  }
+
   fn apply(&mut self, token: Token<'_>, range: SourceRange) {
     match token {
-      Token::OpenBrace => self.open_object(),
-      Token::OpenBracket => self.open_array(),
+      Token::OpenBrace => self.open_object(range),
+      Token::OpenBracket => self.open_array(range),
       Token::CloseBrace | Token::CloseBracket => self.close(),
       Token::Colon => self.set_expect(Expect::Value),
       Token::Comma => self.comma(),
@@ -523,23 +588,25 @@ impl Walker<'_> {
     }
   }
 
-  fn open_object(&mut self) {
+  fn open_object(&mut self, range: SourceRange) {
     let segment = self.value_segment();
     self.stack.push(Frame {
       kind: FrameKind::Object,
       expect: Expect::Key,
       key: None,
       segment,
+      start: range.start,
     });
   }
 
-  fn open_array(&mut self) {
+  fn open_array(&mut self, range: SourceRange) {
     let segment = self.value_segment();
     self.stack.push(Frame {
       kind: FrameKind::Array { next_index: 0 },
       expect: Expect::Value,
       key: None,
       segment,
+      start: range.start,
     });
   }
 
@@ -696,10 +763,7 @@ mod tests {
       .into_iter()
       .map(|item| item.label)
       .collect();
-    assert!(
-      found.contains(&"status".to_owned()),
-      "offset={offset} text={text:?} found={found:?}"
-    );
+    assert_eq!(found, ["author"], "offset={offset} text={text:?}");
     let value = text.find("\"status\": ").unwrap() + "\"status\": ".len();
     let enums: Vec<String> = completions(JsonFamily::Json, &text, value, Some(&documents(object_schema(), &[])))
       .into_iter()
@@ -807,5 +871,71 @@ mod tests {
     let items = completions(JsonFamily::Json, text, offset, Some(&documents(object_schema(), &[])));
     let item = items.first().expect("properties offered");
     assert_eq!(text.get(item.replace.start..item.replace.end), Some("\"\""));
+  }
+}
+
+#[cfg(test)]
+mod sibling_tests {
+  use std::collections::BTreeMap;
+
+  use serde_json::json;
+
+  use super::completions;
+  use crate::schema::{JsonFamily, SchemaDocuments};
+
+  fn run(text: &str, caret: &str) -> Vec<super::SchemaCompletion> {
+    let schema = json!({
+      "type": "object",
+      "properties": { "title": {}, "enabled": {}, "mode": {} }
+    });
+    let root = "https://openit.test/root.json".to_owned();
+    let documents = SchemaDocuments {
+      root: root.clone(),
+      documents: BTreeMap::from([(root, schema)]),
+    };
+    let offset = text.find(caret).unwrap() + caret.len();
+    completions(JsonFamily::Json, text, offset, Some(&documents))
+  }
+
+  fn labels(items: &[super::SchemaCompletion]) -> Vec<&str> {
+    items.iter().map(|item| item.label.as_str()).collect()
+  }
+
+  /// Property order depends on the `preserve_order` feature of `serde_json`,
+  /// which workspace feature unification may turn on, so tests look items up
+  /// by label.
+  fn item<'a>(items: &'a [super::SchemaCompletion], label: &str) -> &'a super::SchemaCompletion {
+    items.iter().find(|item| item.label == label).unwrap()
+  }
+
+  #[test]
+  fn existing_sibling_keys_are_not_offered() {
+    let items = run("{\n  \"title\": \"x\",\n  \n  \"mode\": 1\n}\n", "\"x\",\n  ");
+    assert_eq!(labels(&items), ["enabled"]);
+  }
+
+  #[test]
+  fn key_under_the_caret_is_kept() {
+    let items = run("{\n  \"title\": \"x\",\n  \"en\"\n}\n", "\"en");
+    assert_eq!(labels(&items), ["enabled", "mode"]);
+  }
+
+  #[test]
+  fn nested_keys_do_not_hide_outer_properties() {
+    let items = run("{\n  \"other\": { \"title\": 1 },\n  \n}\n", "},\n  ");
+    assert!(labels(&items).contains(&"title"), "{items:?}");
+  }
+
+  #[test]
+  fn property_insert_adds_the_colon_unless_one_follows() {
+    let bare = run("{\n  \n}\n", "{\n  ");
+    assert_eq!(item(&bare, "enabled").insert, "\"enabled\": ");
+    let quoted = run("{\n  \"en\"\n}\n", "\"en");
+    assert_eq!(item(&quoted, "enabled").insert, "\"enabled\": ");
+    let keyed = run("{\n  \"en\": 1\n}\n", "\"en");
+    let enabled = item(&keyed, "enabled");
+    assert_eq!(enabled.insert, "\"enabled\"");
+    assert_eq!(enabled.replace.start, 4);
+    assert_eq!(enabled.replace.end, 8);
   }
 }

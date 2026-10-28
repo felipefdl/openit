@@ -54,17 +54,38 @@ pub(crate) fn write_atomic(
   prepare: impl FnOnce(&File) -> io::Result<()>,
   write: impl FnOnce(&mut BufWriter<&File>) -> io::Result<()>,
 ) -> io::Result<()> {
-  write_atomic_with_result(target, dir, prepare, write, |_| Ok(()))
+  write_atomic_with_result(target, dir, false, prepare, write, |_| Ok(()))
+}
+
+/// A temp file next to its target. A private one (`0600`) is what internal
+/// state such as drafts wants; a `shared` one is for a file the user asked
+/// for, which gets the mode any new file gets (`0666` minus the umask).
+#[cfg(unix)]
+fn temp_file_in(dir: &Path, shared: bool) -> io::Result<NamedTempFile> {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  if shared {
+    return tempfile::Builder::new()
+      .permissions(fs::Permissions::from_mode(0o666))
+      .tempfile_in(dir);
+  }
+  NamedTempFile::new_in(dir)
+}
+
+#[cfg(not(unix))]
+fn temp_file_in(dir: &Path, _shared: bool) -> io::Result<NamedTempFile> {
+  NamedTempFile::new_in(dir)
 }
 
 fn write_atomic_with_result<R>(
   target: &Path,
   dir: &Path,
+  shared: bool,
   prepare: impl FnOnce(&File) -> io::Result<()>,
   write: impl FnOnce(&mut BufWriter<&File>) -> io::Result<()>,
   result: impl FnOnce(&File) -> io::Result<R>,
 ) -> io::Result<R> {
-  let temp = NamedTempFile::new_in(dir)?;
+  let temp = temp_file_in(dir, shared)?;
   prepare(temp.as_file())?;
   {
     let mut writer = BufWriter::new(temp.as_file());
@@ -102,6 +123,7 @@ pub fn save_text(path: &Path, snapshot: &Snapshot) -> Result<Saved, Error> {
   let fingerprint = write_atomic_with_result(
     &target,
     dir,
+    existing.is_none(),
     |file| {
       existing
         .as_ref()
@@ -139,6 +161,7 @@ pub fn save_bytes(path: &Path, revision: Revision, bytes: &[u8]) -> Result<Saved
   let fingerprint = write_atomic_with_result(
     &target,
     dir,
+    existing.is_none(),
     |file| {
       existing
         .as_ref()
@@ -276,6 +299,27 @@ mod tests {
 
     let mode = fs::metadata(&shared).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o666, "a group-writable file must stay group-writable");
+  }
+
+  /// A file OpenIt creates gets the mode any new file gets, not the `0600`
+  /// of its temp file; an existing one keeps its own.
+  #[cfg(unix)]
+  #[test]
+  fn a_new_file_gets_the_default_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let probe = dir.path().join("probe");
+    fs::File::create(&probe).unwrap();
+    let expected = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+
+    let text = dir.path().join("new.txt");
+    save_text(&text, &snapshot("x", Revision::INITIAL)).unwrap();
+    let bytes = dir.path().join("new.png");
+    save_bytes(&bytes, Revision::INITIAL, b"x").unwrap();
+
+    assert_eq!(fs::metadata(&text).unwrap().permissions().mode() & 0o777, expected);
+    assert_eq!(fs::metadata(&bytes).unwrap().permissions().mode() & 0o777, expected);
   }
 
   #[cfg(unix)]

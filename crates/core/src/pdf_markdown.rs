@@ -33,6 +33,26 @@ pub struct Conversion {
   pub skipped_pages: Vec<u32>,
 }
 
+impl Conversion {
+  /// The Markdown with its figure links pointing at the folder a file named
+  /// `stem` gets, for when the free name differs from the one converted with.
+  /// Only the links of this conversion's own figures change: text that merely
+  /// looks like a link is left as it is.
+  #[must_use]
+  pub fn markdown_for_stem(&self, stem: &str) -> String {
+    let directory = images_dir_name(stem);
+    let mut markdown = self.markdown.clone();
+    for figure in &self.figures {
+      let file = figure.relative_path.rsplit('/').next().unwrap_or(figure.relative_path.as_str());
+      markdown = markdown.replace(
+        &format!("![Figure]({})", figure.relative_path),
+        &format!("![Figure]({directory}/{file})"),
+      );
+    }
+    markdown
+  }
+}
+
 /// What a conversion produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConvertOutcome {
@@ -328,7 +348,8 @@ mod tests {
   use std::sync::atomic::AtomicBool;
 
   use super::{
-    ConvertOutcome, ConvertRequest, Error, convert_to_markdown, images_dir_name, split_pages, substitute_figures,
+    Conversion, ConvertOutcome, ConvertRequest, Error, Figure, convert_to_markdown, images_dir_name, split_pages,
+    substitute_figures,
   };
   use crate::pdf::test_support::{tiny_pdf_pages, tiny_pdf_with_image};
   use crate::pdf::{PdfDocument, open_pdf};
@@ -353,6 +374,24 @@ mod tests {
   #[test]
   fn images_dir_is_named_after_the_stem() {
     assert_eq!(images_dir_name("paper"), "paper-images");
+  }
+
+  #[test]
+  fn retargeting_rewrites_only_figure_links() {
+    let conversion = Conversion {
+      markdown: "See [link](https://example.com) and [doc](notes/readme.md)\n\n![Figure](paper-images/p001-01.png)\n"
+        .to_owned(),
+      figures: vec![Figure {
+        relative_path: "paper-images/p001-01.png".to_owned(),
+        png: Vec::new(),
+      }],
+      skipped_pages: Vec::new(),
+    };
+
+    assert_eq!(
+      conversion.markdown_for_stem("paper-2"),
+      "See [link](https://example.com) and [doc](notes/readme.md)\n\n![Figure](paper-2-images/p001-01.png)\n"
+    );
   }
 
   #[test]

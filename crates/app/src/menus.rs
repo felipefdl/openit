@@ -1,17 +1,23 @@
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
-use gpui_kit::{App, Menu, MenuItem, OsAction};
+use gpui_kit::{App, BorrowAppContext as _, Menu, MenuItem, OsAction};
 use openit_core::settings::{MarkdownPreviewWidth, Settings, ThemeMode};
 
 use crate::actions::{
   ActualSize, CheckForUpdates, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find,
   FlipHorizontal, FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages,
-  Quit, RotateLeft, RotateRight, Save, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode,
+  Quit, RotateLeft, RotateRight, Save, SelectNextOccurrence, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode,
   ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 
 /// Build the application's native menu bar for the current settings.
+#[cfg(test)]
 pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
+  build_with_background(settings, None)
+}
+
+/// The menu bar with the check on View > Image Background set for `current_background`.
+fn build_with_background(settings: &Settings, current_background: Option<ImageBackground>) -> Vec<Menu> {
   let mode = settings.theme.mode;
   let preview_width = Menu::new("Markdown Preview Width").items([
     MenuItem::action("Readable", SetMarkdownPreviewWidth { width: MarkdownPreviewWidth::Readable })
@@ -30,16 +36,14 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
     MenuItem::action("UI Font...", UiFont),
     MenuItem::action("Code Font...", CodeFont),
   ]);
+  let background_item = |label: &'static str, background: ImageBackground| {
+    MenuItem::action(label, SetImageBackground { background }).checked(current_background == Some(background))
+  };
   let image_background = Menu::new("Image Background").items([
-    MenuItem::action("Theme", SetImageBackground { background: ImageBackground::Theme }),
-    MenuItem::action("White", SetImageBackground { background: ImageBackground::White }),
-    MenuItem::action("Black", SetImageBackground { background: ImageBackground::Black }),
-    MenuItem::action(
-      "Checkerboard",
-      SetImageBackground {
-        background: ImageBackground::Checkerboard,
-      },
-    ),
+    background_item("Theme", ImageBackground::Theme),
+    background_item("White", ImageBackground::White),
+    background_item("Black", ImageBackground::Black),
+    background_item("Checkerboard", ImageBackground::Checkerboard),
     MenuItem::separator(),
     MenuItem::action("Next Background", CycleBackground),
   ]);
@@ -73,6 +77,7 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
       MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
       MenuItem::separator(),
       MenuItem::action("Find...", Find),
+      MenuItem::action("Select Next Occurrence", SelectNextOccurrence),
     ]),
     Menu::new("View").items([
       MenuItem::action("Toggle Preview / Edit", ToggleMode),
@@ -101,9 +106,33 @@ pub(crate) fn build(settings: &Settings) -> Vec<Menu> {
   ]
 }
 
+/// The background the frontmost image window shows, for the checkmark in
+/// View > Image Background. `None` until an image window reports one.
+#[derive(Default)]
+pub(crate) struct ActiveImageBackground(pub(crate) Option<ImageBackground>);
+
+impl gpui_kit::Global for ActiveImageBackground {}
+
+/// Record the background of the frontmost image window and refresh the check in
+/// View > Image Background when it changed.
+pub(crate) fn set_active_image_background(background: ImageBackground, cx: &mut App) {
+  let changed = cx.update_default_global::<ActiveImageBackground, _>(|active, _| {
+    let changed = active.0 != Some(background);
+    active.0 = Some(background);
+    changed
+  });
+  if changed {
+    install(cx);
+  }
+}
+
 /// Install the application's native menu bar.
 pub fn install(cx: &App) {
-  cx.set_menus(build(&cx.global::<crate::settings::AppSettings>().0));
+  let Some(settings) = cx.try_global::<crate::settings::AppSettings>() else {
+    return;
+  };
+  let background = cx.try_global::<ActiveImageBackground>().and_then(|active| active.0);
+  cx.set_menus(build_with_background(&settings.0, background));
 }
 
 #[cfg(test)]
@@ -161,5 +190,27 @@ mod tests {
       .flat_map(|menu| menu.items)
       .any(|item| matches!(item, MenuItem::Action { name, .. } if name == "Install Command Line Tools..."));
     assert!(listed, "the OpenIt menu lists Install Command Line Tools...");
+  }
+
+  #[test]
+  fn image_background_menu_checks_only_the_background_in_use() {
+    use crate::image_view::ImageBackground;
+
+    let checked: Vec<_> = super::build_with_background(&Settings::default(), Some(ImageBackground::Black))
+      .into_iter()
+      .filter(|menu| menu.name == "View")
+      .flat_map(|menu| menu.items)
+      .find_map(|item| match item {
+        MenuItem::Submenu(menu) if menu.name == "Image Background" => Some(menu.items),
+        _ => None,
+      })
+      .expect("the View menu offers Image Background")
+      .into_iter()
+      .filter_map(|item| match item {
+        MenuItem::Action { name, checked: true, .. } => Some(name),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(checked, ["Black"]);
   }
 }

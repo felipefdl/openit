@@ -77,6 +77,12 @@ actions!(
     NextMatch,
     /// Step to the previous search match.
     PreviousMatch,
+    /// Replace the current editor search match and step to the next.
+    ReplaceMatch,
+    /// Replace every editor search match.
+    ReplaceAllMatches,
+    /// Add the next occurrence of the editor selection as another selection.
+    SelectNextOccurrence,
     /// Open the go-to-page prompt.
     GoToPage,
     /// Move down one page.
@@ -87,6 +93,18 @@ actions!(
     FirstPage,
     /// Move to the last page.
     LastPage,
+    /// Scroll the Markdown preview up one step.
+    PreviewLineUp,
+    /// Scroll the Markdown preview down one step.
+    PreviewLineDown,
+    /// Scroll the Markdown preview up one screen.
+    PreviewPageUp,
+    /// Scroll the Markdown preview down one screen.
+    PreviewPageDown,
+    /// Scroll the Markdown preview to its start.
+    PreviewTop,
+    /// Scroll the Markdown preview to its end.
+    PreviewBottom,
     /// Select every character of the PDF text layer.
     SelectAll,
     /// Copy the selected PDF text.

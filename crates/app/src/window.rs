@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::{
-  AnyWindowHandle, App, AppContext, Bounds, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, px,
-  size,
+  AnyWindowHandle, App, AppContext, Bounds, Pixels, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
+  point, px, size,
 };
 use openit_core::document::{load_image, load_pdf, load_text};
-use openit_core::kind::{DocumentKind, detect};
+use openit_core::kind::{DocumentKind, detect, sniff_text};
 use openit_core::recovery::{Draft, RecoveryStore};
 use openit_core::session::SessionId;
 
@@ -37,14 +37,56 @@ fn document_title(path: Option<&Path>) -> SharedString {
     .into()
 }
 
+/// How far each new window sits from the frontmost one, in both axes.
+const CASCADE_STEP: f32 = 28.;
+
+/// Where a window of `window_size` opens: stepped down and right from
+/// `frontmost`. A step that would leave `display` wraps back to the display's
+/// top-left corner.
+fn cascaded_bounds(
+  frontmost: Bounds<Pixels>,
+  display: Bounds<Pixels>,
+  window_size: gpui_kit::Size<Pixels>,
+) -> Bounds<Pixels> {
+  let step = px(CASCADE_STEP);
+  let stepped = point(frontmost.origin.x + step, frontmost.origin.y + step);
+  let fits = stepped.x + window_size.width <= display.right() && stepped.y + window_size.height <= display.bottom();
+  let origin = if fits {
+    stepped
+  } else {
+    point(display.origin.x + step, display.origin.y + step)
+  };
+  Bounds { origin, size: window_size }
+}
+
+/// The frontmost window's bounds and the display it is on.
+fn frontmost_bounds(cx: &mut App) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+  let handle = cx
+    .window_stack()
+    .and_then(|stack| stack.into_iter().next())
+    .or_else(|| cx.active_window())?;
+  handle
+    .update(cx, |_, window, cx| {
+      let display = window.display(cx)?;
+      Some((window.bounds(), display.bounds()))
+    })
+    .ok()
+    .flatten()
+}
+
 /// The document view draws the title bar (title, mode toggle, theme) beside the traffic lights.
-fn document_window_options(title: SharedString, cx: &App) -> WindowOptions {
+fn document_window_options(title: SharedString, cx: &mut App) -> WindowOptions {
+  let window_size = size(px(960.), px(720.));
+  let bounds = frontmost_bounds(cx).map_or_else(
+    || Bounds::centered(None, window_size, cx),
+    |(frontmost, display)| cascaded_bounds(frontmost, display, window_size),
+  );
   WindowOptions {
     titlebar: Some(TitlebarOptions {
       title: Some(title),
       ..TitleBar::title_bar_options()
     }),
-    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(720.)), cx))),
+    window_bounds: Some(WindowBounds::Windowed(bounds)),
     window_min_size: Some(size(px(480.), px(320.))),
     ..TitleBar::window_options()
   }
@@ -572,6 +614,7 @@ fn restore_draft(draft: Draft, title: &SharedString, window: &mut Window, cx: &m
   reason = "GPUI schedules work from a mutable application callback"
 )]
 pub fn open_untitled_text(text: String, cx: &mut App) {
+  let kind = sniff_text(&text);
   let draft = Draft {
     session: SessionId::new(),
     path: None,
@@ -583,14 +626,17 @@ pub fn open_untitled_text(text: String, cx: &mut App) {
   };
   if let Some(empty) = empty_window(cx) {
     let _ = empty.update(cx, |_, window, cx| {
-      window.replace_root(cx, |window, cx| {
-        DocumentView::restore(draft, DocumentKind::Text { language: None }, window, cx)
-      });
+      window.replace_root(cx, |window, cx| DocumentView::from_clipboard(draft, kind, window, cx));
       window.set_window_title("Untitled");
     });
     return;
   }
-  open_draft_window(draft, cx);
+  let options = document_window_options("Untitled".into(), cx);
+  if let Err(error) = cx.open_window(options, move |window, cx| {
+    cx.new(|cx| DocumentView::from_clipboard(draft, kind, window, cx))
+  }) {
+    tracing::error!(%error, "window open failed");
+  }
 }
 
 /// With no command-line paths, open an empty window immediately, then restore
@@ -1107,5 +1153,21 @@ mod tests {
 
     assert_eq!(cx.windows().len(), 1, "the in-flight open still produces a window");
     assert!(!cx.update(|cx| cx.global::<crate::QuitCommitted>().0));
+  }
+
+  #[test]
+  fn a_new_window_steps_from_the_frontmost_and_wraps_at_the_display_edge() {
+    use gpui_kit::{Bounds, point, px, size};
+
+    let display = Bounds::new(point(px(0.), px(0.)), size(px(1600.), px(1000.)));
+    let window = size(px(960.), px(720.));
+
+    let first = Bounds::new(point(px(320.), px(140.)), window);
+    let stepped = super::cascaded_bounds(first, display, window);
+    assert_eq!(stepped.origin, point(px(348.), px(168.)));
+
+    let last = Bounds::new(point(px(640.), px(270.)), window);
+    let wrapped = super::cascaded_bounds(last, display, window);
+    assert_eq!(wrapped.origin, point(px(28.), px(28.)), "no room to step: back to the corner");
   }
 }

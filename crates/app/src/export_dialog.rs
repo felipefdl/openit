@@ -4,9 +4,11 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::{ActiveTheme, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
-use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, IntoElement, Render, Subscription, Window, div, px};
+use gpui_kit::{
+  App, AppContext, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, Subscription, Window, div, px,
+};
 use openit_core::raster::{Background, ExportOptions, OutputFormat, SizeRule, output_size};
 
 use crate::status_pickers::overlay_frame;
@@ -48,15 +50,28 @@ impl Preset {
   }
 }
 
+/// JPEG quality the dialog starts at.
+const DEFAULT_QUALITY: u8 = 85;
+
 /// The formats the dialog can write, in the order they are shown.
 const FORMATS: [OutputFormat; 6] = [
   OutputFormat::Png,
-  OutputFormat::Jpeg { quality: 85 },
+  OutputFormat::Jpeg { quality: DEFAULT_QUALITY },
   OutputFormat::WebP,
   OutputFormat::Bmp,
   OutputFormat::Tiff,
   OutputFormat::Gif,
 ];
+
+/// Width of the dialog panel; wide enough for every format on one row.
+const PANEL_WIDTH: f32 = 560.;
+/// Gap above the panel, matching `overlay_frame`.
+const PANEL_TOP: f32 = 60.;
+/// Gap kept below the panel: the image window's status bar row (24 px) plus a
+/// margin, so a short window still shows the panel's edge above that bar.
+const PANEL_BOTTOM: f32 = 40.;
+/// Height reserved for the two advanced rows, so opening them moves nothing.
+const ADVANCED_HEIGHT: f32 = 80.;
 
 /// What the dialog decided.
 pub enum ExportEvent {
@@ -82,6 +97,8 @@ pub struct ExportDialog {
   quality: u8,
   width_input: Entity<InputState>,
   height_input: Entity<InputState>,
+  quality_input: Entity<InputState>,
+  focus: FocusHandle,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -93,6 +110,9 @@ impl ExportDialog {
     let (width, height) = (source.0.max(1), source.1.max(1));
     let width_input = cx.new(|cx| InputState::new(window, cx).default_value(width.to_string()));
     let height_input = cx.new(|cx| InputState::new(window, cx).default_value(height.to_string()));
+    let quality_input = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_QUALITY.to_string()));
+    let focus = cx.focus_handle();
+    window.focus(&focus, cx);
     let subscriptions = vec![
       cx.subscribe_in(
         &width_input,
@@ -118,6 +138,18 @@ impl ExportDialog {
           }
         },
       ),
+      cx.subscribe_in(
+        &quality_input,
+        window,
+        |dialog: &mut Self, state, event: &InputEvent, _window, cx| {
+          if matches!(event, InputEvent::Change)
+            && let Ok(typed) = state.read(cx).value().trim().parse::<u8>()
+            && (1..=100).contains(&typed)
+          {
+            dialog.set_quality(typed, cx);
+          }
+        },
+      ),
     ];
     Self {
       source: (width, height),
@@ -135,9 +167,11 @@ impl ExportDialog {
       advanced_open: false,
       size_rule: SizeRule::FitInside,
       keep_icc: false,
-      quality: 85,
+      quality: DEFAULT_QUALITY,
       width_input,
       height_input,
+      quality_input,
+      focus,
       _subscriptions: subscriptions,
     }
   }
@@ -181,10 +215,31 @@ impl ExportDialog {
     cx.notify();
   }
 
+  /// Choose the JPEG quality, 1 through 100.
+  pub fn set_quality(&mut self, quality: u8, cx: &mut Context<Self>) {
+    self.quality = quality.clamp(1, 100);
+    if let OutputFormat::Jpeg { .. } = self.format {
+      self.format = OutputFormat::Jpeg { quality: self.quality };
+    }
+    cx.notify();
+  }
+
   /// Fill the size fields from a preset.
   pub fn set_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
     self.preset = preset;
-    if let Some((width, height)) = preset.size(self.source) {
+    self.apply_preset(window, cx);
+  }
+
+  /// Write the size the current preset asks for into the fields. `1080p`
+  /// under `Fit inside` shows the size the export will produce, so the fields
+  /// and the readout agree.
+  fn apply_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some((width, height)) = self.preset.size(self.source) {
+      let (width, height) = if self.preset == Preset::P1080 && self.size_rule == SizeRule::FitInside {
+        output_size(self.source, &ExportOptions { width, height, ..self.options(cx) })
+      } else {
+        (width, height)
+      };
       self.write_size(width, height, window, cx);
     }
     cx.notify();
@@ -207,7 +262,9 @@ impl ExportDialog {
   /// Choose how the requested size is read.
   pub fn set_size_rule(&mut self, rule: SizeRule, window: &mut Window, cx: &mut Context<Self>) {
     self.size_rule = rule;
-    if rule == SizeRule::FitInside && self.lock_aspect {
+    if self.preset == Preset::P1080 {
+      self.apply_preset(window, cx);
+    } else if rule == SizeRule::FitInside && self.lock_aspect {
       let height = self.paired_height(self.width);
       self.write_size(self.width, height, window, cx);
     }
@@ -279,12 +336,12 @@ impl ExportDialog {
       .gap_3()
       .px_3()
       .py_2()
-      .child(div().w(px(84.)).text_sm().text_color(muted).child(label))
+      .child(div().w(px(84.)).flex_shrink_0().text_sm().text_color(muted).child(label))
       .child(control)
       .into_any_element()
   }
 
-  /// Format, size preset, pixel fields, and background.
+  /// Format, quality, size preset, pixel fields, and background.
   #[expect(
     clippy::needless_pass_by_ref_mut,
     reason = "cx.listener requires the mutable Context signature"
@@ -304,6 +361,9 @@ impl ExportDialog {
     };
     let background_index = backgrounds.iter().position(|(_, value)| *value == self.background);
     let background_values: Vec<Background> = backgrounds.iter().map(|(_, value)| *value).collect();
+    // The row stays in place for every format: only JPEG has a quality.
+    let jpeg = matches!(self.format, OutputFormat::Jpeg { .. });
+    let size_locked = self.preset == Preset::Original;
     vec![
       Self::row(
         "Format",
@@ -316,6 +376,17 @@ impl ExportDialog {
               dialog.set_format(*format, cx);
             }
           }))
+          .into_any_element(),
+      ),
+      Self::row(
+        "Quality",
+        muted,
+        div()
+          .flex()
+          .items_center()
+          .gap_2()
+          .child(div().w(px(96.)).child(Input::new(&self.quality_input).small().disabled(!jpeg)))
+          .child(div().text_xs().text_color(muted).child("1 to 100, JPEG only"))
           .into_any_element(),
       ),
       Self::row(
@@ -338,13 +409,22 @@ impl ExportDialog {
           .flex()
           .items_center()
           .gap_2()
-          .child(div().w(px(96.)).child(Input::new(&self.width_input).small()))
+          .child(
+            div()
+              .w(px(96.))
+              .child(Input::new(&self.width_input).small().disabled(size_locked)),
+          )
           .child(div().text_xs().text_color(muted).child("x"))
-          .child(div().w(px(96.)).child(Input::new(&self.height_input).small()))
+          .child(
+            div()
+              .w(px(96.))
+              .child(Input::new(&self.height_input).small().disabled(size_locked)),
+          )
           .child(
             Checkbox::new("export-lock")
               .label("Lock aspect")
               .checked(self.lock_aspect)
+              .disabled(size_locked)
               .on_click(cx.listener(|dialog, checked: &bool, _window, cx| {
                 dialog.lock_aspect = *checked;
                 cx.notify();
@@ -368,7 +448,8 @@ impl ExportDialog {
     ]
   }
 
-  /// The collapsed section: sizing rule and metadata.
+  /// The collapsed section: sizing rule and metadata. Its rows live in a box
+  /// of fixed height, so opening it does not move the footer.
   #[expect(
     clippy::needless_pass_by_ref_mut,
     reason = "cx.listener requires the mutable Context signature"
@@ -376,22 +457,29 @@ impl ExportDialog {
   fn render_advanced(&self, muted: gpui_kit::Hsla, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
     let toggle = div()
       .id("export-advanced")
+      .flex()
+      .items_center()
+      .gap_1()
       .px_3()
       .py_2()
       .text_xs()
       .text_color(muted)
       .cursor_pointer()
-      .child(if self.advanced_open {
-        "Advanced"
-      } else {
-        "Advanced..."
-      })
+      .child(
+        Icon::new(if self.advanced_open {
+          IconName::ChevronDown
+        } else {
+          IconName::ChevronRight
+        })
+        .small(),
+      )
+      .child("Advanced")
       .on_click(cx.listener(|dialog, _, _window, cx| {
         dialog.advanced_open = !dialog.advanced_open;
         cx.notify();
       }))
       .into_any_element();
-    let mut rows = vec![toggle];
+    let mut rows = Vec::new();
     if self.advanced_open {
       rows.push(Self::row(
         "Sizing",
@@ -419,7 +507,16 @@ impl ExportDialog {
           .into_any_element(),
       ));
     }
-    rows
+    vec![
+      toggle,
+      div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .h(px(ADVANCED_HEIGHT))
+        .children(rows)
+        .into_any_element(),
+    ]
   }
 
   /// The output size readout and the two buttons.
@@ -432,6 +529,7 @@ impl ExportDialog {
     let border = cx.theme().border;
     div()
       .flex()
+      .flex_none()
       .items_center()
       .gap_2()
       .px_3()
@@ -466,28 +564,48 @@ impl ExportDialog {
 }
 
 impl Render for ExportDialog {
-  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let palette = cx.global::<ActivePalette>().0;
     let muted = cx.theme().muted_foreground;
-    let mut children: Vec<gpui_kit::AnyElement> = vec![
-      div()
-        .px_3()
-        .pt_3()
-        .pb_1()
-        .text_sm()
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .child("Export image")
-        .into_any_element(),
-    ];
-    children.extend(self.render_choices(muted, cx));
-    children.extend(self.render_advanced(muted, cx));
-    children.push(self.render_footer(muted, cx));
+    let mut body = self.render_choices(muted, cx);
+    body.extend(self.render_advanced(muted, cx));
+    let header = div()
+      .flex_none()
+      .px_3()
+      .pt_3()
+      .pb_1()
+      .text_sm()
+      .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+      .child("Export image")
+      .into_any_element();
+    let footer = self.render_footer(muted, cx);
+    // The options scroll inside the panel, so the footer stays reachable in a
+    // window shorter than the dialog.
+    let max_height = (window.viewport_size().height - px(PANEL_TOP + PANEL_BOTTOM)).max(px(160.));
     overlay_frame(
       "export-dialog",
       &palette,
       cx.listener(|_, _, _, cx| cx.emit(ExportEvent::Close)),
-      move |panel| panel.children(children),
+      move |panel| {
+        panel
+          .w(px(PANEL_WIDTH))
+          .max_w_full()
+          .max_h(max_height)
+          .child(header)
+          .child(
+            div()
+              .id("export-body")
+              .flex()
+              .flex_col()
+              .flex_1()
+              .min_h_0()
+              .overflow_y_scroll()
+              .children(body),
+          )
+          .child(footer)
+      },
     )
+    .track_focus(&self.focus)
     .capture_action(cx.listener(|_, _: &gpui_kit::component::input::Escape, _, cx| cx.emit(ExportEvent::Close)))
   }
 }
@@ -516,6 +634,24 @@ mod tests {
       "the aspect lock keeps the ratio"
     );
     assert_eq!(dialog.read_with(cx, |dialog, _| dialog.preset()), Preset::Custom);
+  }
+
+  #[gpui_kit::test]
+  fn the_1080p_fields_show_the_size_the_export_produces(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let (dialog, cx) = cx.add_window_view(|window, cx| ExportDialog::new((256, 256), false, "icon", window, cx));
+
+    dialog.update_in(cx, |dialog, window, cx| dialog.set_preset(Preset::P1080, window, cx));
+    let options = dialog.read_with(cx, super::ExportDialog::options);
+    let output = dialog.read_with(cx, super::ExportDialog::output_size);
+    assert_eq!((options.width, options.height), output, "fields and readout agree");
+    assert_eq!(output, (1080, 1080));
+
+    dialog.update_in(cx, |dialog, window, cx| dialog.set_size_rule(SizeRule::Exact, window, cx));
+    let options = dialog.read_with(cx, super::ExportDialog::options);
+    assert_eq!((options.width, options.height), (1920, 1080), "exact keeps the preset as named");
+    assert_eq!(dialog.read_with(cx, super::ExportDialog::output_size), (1920, 1080));
   }
 
   #[gpui_kit::test]
@@ -550,6 +686,33 @@ mod tests {
     assert_eq!(
       dialog.read_with(cx, |dialog, cx| dialog.options(cx).background),
       Background::White
+    );
+  }
+
+  #[gpui_kit::test]
+  fn the_jpeg_quality_reaches_the_result_and_survives_a_format_change(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let (dialog, cx) = cx.add_window_view(|window, cx| ExportDialog::new((10, 10), false, "photo", window, cx));
+
+    dialog.update(cx, |dialog, cx| {
+      dialog.set_quality(60, cx);
+      dialog.set_format(OutputFormat::Jpeg { quality: 85 }, cx);
+    });
+    assert_eq!(
+      dialog.read_with(cx, |dialog, cx| dialog.options(cx).format),
+      OutputFormat::Jpeg { quality: 60 }
+    );
+
+    dialog.update(cx, |dialog, cx| {
+      dialog.set_format(OutputFormat::Png, cx);
+      dialog.set_quality(0, cx);
+      dialog.set_format(OutputFormat::Jpeg { quality: 85 }, cx);
+    });
+    assert_eq!(
+      dialog.read_with(cx, |dialog, cx| dialog.options(cx).format),
+      OutputFormat::Jpeg { quality: 1 },
+      "quality is kept inside 1 to 100"
     );
   }
 

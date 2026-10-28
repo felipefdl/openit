@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::base::actions::{SelectDown, SelectUp};
+use gpui_kit::base::actions::{Cancel, SelectDown, SelectUp};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::prelude::*;
@@ -15,11 +15,11 @@ use openit_core::settings::ThemeMode;
 use openit_core::theme::ThemeKind;
 
 use crate::settings::{AppSettings, SettingsStore};
-use crate::theme::{ActivePalette, ThemeCatalog, ThemeEntry, apply_for_appearance, apply_theme, hsla};
+use crate::theme::{ActivePalette, ThemeCatalog, ThemeEntry, apply_for_appearance, apply_theme, hsla, overlay_border};
 
 const PLACEHOLDER: &str = "Select Color Theme";
-const DARK_THEMES: &str = "dark themes";
-const LIGHT_THEMES: &str = "light themes";
+const DARK_THEMES: &str = "Dark Themes";
+const LIGHT_THEMES: &str = "Light Themes";
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(80);
 
 /// Filter by label substring and put the OS-preferred kind first.
@@ -298,12 +298,13 @@ impl Render for ThemePicker {
           .overflow_hidden()
           .bg(hsla(palette.sidebar))
           .border_1()
-          .border_color(hsla(palette.border))
+          .border_color(overlay_border(&palette))
           .rounded_lg()
           .shadow_lg()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .capture_action(cx.listener(|this, _: &SelectUp, _, cx| this.schedule_preview(cx)))
           .capture_action(cx.listener(|this, _: &SelectDown, _, cx| this.schedule_preview(cx)))
+          .capture_action(cx.listener(|this, _: &Cancel, window, cx| this.close(window, cx)))
           .child(command),
       )
   }

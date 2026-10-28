@@ -13,7 +13,7 @@ Out of scope: exact UI styling, benchmark thresholds (measured, not invented; se
 
 ## Approach
 
-OpenIt is a fresh application organized around documents. It uses gpui-kit 0.7.0 presentation primitives (`EditorState`/`Editor` for text, `TextViewState`/`TextView` for Markdown) and focused helpers where they fit (bounded image decoding, local-asset grant logic). It does not import a repository model, mandatory autosave, another application's window shell, or another product's branding, and it does not introduce a library shared with another application.
+OpenIt is a fresh application organized around documents. It uses gpui-kit 0.8.1 presentation primitives (`EditorState`/`Editor` for text, `TextViewState`/`TextView` for Markdown) and focused helpers where they fit (bounded image decoding, local-asset grant logic). It does not import a repository model, mandatory autosave, another application's window shell, or another product's branding, and it does not introduce a library shared with another application.
 
 Alternatives considered and rejected:
 
@@ -66,8 +66,8 @@ The session increments a revision on every `InputEvent::Change`. A snapshot is t
 ### Saving
 
 - Cmd/Ctrl+S saves to the current path or opens Save As for an untitled document.
-- A save captures one revision. Edits made during the write stay unsaved and mark the document dirty again.
-- Writes go to a temporary file in the target directory followed by an atomic rename. The original file is never truncated in place.
+- A save captures one revision. Edits made during the write stay unsaved and mark the document dirty again. Returning the text buffer to its loaded or last-saved text, including through undo, clears the dirty marker and removes its stale draft; a recovered draft has no such baseline until saved or reloaded.
+- Writes go to a temporary file in the target directory followed by an atomic rename. The original file is never truncated in place. On Unix, new documents and exports use `0666` minus the umask; existing files keep their permissions, and drafts, cache, and settings stay private.
 - Writes to the same path are serialized across windows.
 - Autosave is an opt-in setting using the same save path, only for documents with an established path. It never picks a destination for untitled content.
 - Schema errors never block saving.
@@ -82,7 +82,7 @@ The session increments a revision on every `InputEvent::Change`. A snapshot is t
 ### Close and quit
 
 - Quit asks each dirty document in turn: Save, Discard, or Cancel. Cancel stops the quit and keeps every window. Discard deletes that document's recovery data, so nothing returns on relaunch. A pending save-then-close whose save fails keeps its window and stops the quit.
-- Explicitly closing a dirty document offers the same Save, Discard, and Cancel.
+- Explicitly closing a dirty document offers the same Save, Discard, and Cancel. Text and image prompts say "Discard removes the recovered draft as well." only for a recovered draft; other unsaved documents, including fresh clipboard content, say "Your changes will be lost if you don't save them."
 - Closing the last window quits on Linux and Windows through the same quit path as Cmd/Ctrl+Q, unless an open is still in flight. On macOS the app stays resident with no windows so Dock reopen can show an empty one.
 
 ### External changes
@@ -104,15 +104,21 @@ A failed save or checkpoint keeps the buffer and shows an actionable error in th
 - Preview refreshes only when the revision changes, not on hidden-preview keystrokes.
 - Preview layout: `View > Markdown Preview Width` offers Readable (700 px, default), Wide (960 px), and Full Width. Fixed-width columns are centered and shrink to fit smaller windows; all presets retain at least 24 px side padding. Width changes apply to open previews and persist app-wide without changing editor wrapping. Body text is 16 px with 1.6 line height. Links, inline code, code blocks, and tables take their colors from the active theme palette. Tables use gpui-base's measured layout (word wrapping; a table wider than the column scrolls sideways). The `TextView` owns the scroll so it stays virtualized (a 24,000-line file opens in about 0.6 s and scrolls smoothly; the non-virtualized layout could not open it at all). Scrollbar placement limitations are tracked in [Blocked features](../blocked-features.md).
 - Text selection in the preview comes from gpui-base's window-level `TextSelectionLayer`, which the document view mounts itself (OpenIt windows do not use gpui-component's `Root`).
-- Find in the preview: `Edit > Find…` (Cmd/Ctrl+F) opens a find bar over the preview. Matching runs on the rendered text, not the Markdown source, and folds case, ligatures, diacritics, and whitespace runs the way PDF search does (`openit_core::text_find`). Every match is highlighted through gpui-base's `TextViewState` range highlights, the current one stronger, and the current one is revealed. The bar shows `X of N`; Enter and Cmd/Ctrl+G step forward, Shift for back, wrapping at both ends; Escape or Done closes it and clears the highlights. A reparse searches again. Switching to Edit closes the bar; in the editor, Find opens gpui-kit's built-in search panel and Cmd/Ctrl+G steps its matches.
+- Find: `Edit > Find…` (Cmd/Ctrl+F) opens one find bar for the preview, the editor, and PDFs. It is a card with rounded corners, a border, and a shadow, holding the query field, previous/next chevron buttons, `X of N`, and Done in a fixed 48 px row. Over the preview and the editor it sits in the top-right corner, 440 px wide, inset 8 px from the edges plus a 12 px scrollbar gutter, where it covers the least text; over PDFs it is centered and up to 640 px wide for its results list. It floats over the document: opening, resizing, or closing it moves no text. In the editor it sets a reveal margin (gpui-kit's `cursor_surrounding_lines`, as many lines as the bar covers plus one) while open, so a match it scrolls to lands below the bar. gpui-base reveals preview matches without a margin, so after a reveal that scrolled the preview up, the view scrolls back by the bar's height to bring the match out from under it. Extra space above the first line (as editors offer while their find widget is open) is not available: gpui-kit exposes no padding inside the editor's scroll area. Enter, Down, and Cmd/Ctrl+G step forward, Shift+Enter, Up, and Cmd/Ctrl+Shift+G step back, wrapping at both ends; Escape or Done closes it and clears the highlights. Switching modes closes it.
+- Find in the preview matches the rendered text, not the Markdown source, and folds case, ligatures, diacritics, and whitespace runs the way PDF search does (`openit_core::text_find`). Every match is highlighted through gpui-base's `TextViewState` range highlights, the current one stronger, and the current one is revealed. A reparse searches again.
+- Find in the editor drives gpui-kit's editor search through its public custom-search API (`searchable(false)`, `set_search_query`, `next_search_match`, `replace_current_search_match`, `replace_all_search_matches`); gpui-kit's own panel stays hidden, and the editor's Find and Replace shortcuts reach this bar. Matching is literal and ignores case unless the `Aa` toggle is on. A single-line selection seeds the query. A new query reveals its current match. The replace toggle, or Cmd+Shift+F on macOS and Ctrl+H elsewhere, opens a replace row under the query: Enter or Replace replaces the current match and moves to the next, Cmd/Ctrl+Enter or Replace All replaces every match. Replacements are ordinary edits.
 
 ### Reading position
 
 Switching modes keeps the retained editor state (buffer, undo history, caret, selection) and the preview's own scroll position. Following the same passage across modes by source location is not supported; a mode switch lands at the top of the target surface. The upstream requirements and prototype findings are tracked in [Blocked features](../blocked-features.md).
 
+With the preview focused, Up/Down scroll by a line step; Page Up/Page Down and Shift+Space/Space scroll by a screen; Home/End, Cmd+Up/Down, and Ctrl+Home/End reach the start or end. These bindings do not apply while an input, find bar, or dialog has focus.
+
 ### Editing tools
 
-gpui-kit supplies syntax highlighting, the built-in find/replace panel, undo/redo, multicursor editing, automatic bracket and quote closing, and smart indentation. OpenIt uses these built-in editing capabilities and adds a small go-to-line prompt. Language changes update the retained editor's highlighter and wrapping without replacing its buffer, selection, or undo history. No second editing engine, no language server, no formatter. JSON-family schema completions are a `CompletionProvider` on `EditorState`; details in [Schema validation](schema-validation.md).
+gpui-kit supplies syntax highlighting, undo/redo, multicursor editing, automatic bracket and quote closing, smart indentation, and the search and replace operations behind OpenIt's find bar. OpenIt uses these built-in editing capabilities and adds a small go-to-line prompt and next-occurrence selection: `Edit > Select Next Occurrence` (Cmd/Ctrl+D) adds the next exact, case-sensitive match of the selection as another cursor through gpui-kit's `add_selection`, wrapping at the end and stopping once every occurrence is selected. From a bare caret it first selects the word under it, and that run matches whole words only. Pressed in the find bar, it first selects the current search match and returns focus to the text, so further presses and typing continue from there. Language changes update the retained editor's highlighter and wrapping without replacing its buffer, selection, or undo history. No second editing engine, no language server, no formatter. JSON-family schema completions are a `CompletionProvider` on `EditorState`; they open while typing and on demand with Ctrl+Space. Details in [Schema validation](schema-validation.md).
+
+Go to line rejects invalid input and lines past the end instead of clamping, keeping the prompt open. Its existing hint row explains the valid range or says "Line X is past the end of the document (N lines)"; after a rejected Return the hint uses the foreground color until the next edit, without moving the layout.
 
 ### Diagnostics
 
@@ -132,14 +138,14 @@ Schema results are pushed through the public `DiagnosticSet` on `EditorState` as
 #### Opening
 
 - `.pdf` opens in the PDF reader; a file whose bytes do not start with `%PDF-` shows the unsupported-format explanation. Files over 256 MiB are refused with the size explanation.
-- Password-protected documents prompt for the password in the window; it is held in memory for that window only and never persisted. A wrong password re-prompts; Cancel shows the explanation in place of the pages.
+- Password-protected documents prompt for the password in the window; it is held in memory for that window only and never persisted. A wrong password re-prompts; Cancel keeps the document locked and shows one explanation in place of the pages, with an "Enter Password…" button to reopen the prompt.
 - Page count and every page's size come from the document structure before any page renders, so the layout is stable from the first frame.
 - Until the document opens, the reader shows `Opening <name>…` centered in place of the pages.
 
 #### Viewing
 
 - Continuous vertical scrolling with a fixed gap between pages, centered. Opens at fit-to-width. Zoom in and out (Cmd/Ctrl+Plus, Cmd/Ctrl+Minus, scroll wheel with Cmd/Ctrl, pinch), fit to width (Cmd/Ctrl+0), actual size (Cmd/Ctrl+1, one PDF point per logical pixel). Zoom keeps the point under the cursor fixed.
-- Page navigation: Option+Cmd/Ctrl+G (Alt+Ctrl+G on Windows and Linux) or a click on the status bar page readout opens a go-to-page prompt (`page`, prefilled, "Page X of N"); Page Up and Page Down move one page; Home and End move to the first and last page.
+- Page navigation: Option+Cmd/Ctrl+G (Alt+Ctrl+G on Windows and Linux) or a click on the status bar page readout opens a go-to-page prompt (`page`, prefilled, "Page X of N"); Page Up and Page Down move one page; Home and End move to the first and last page. Invalid or out-of-range input keeps the prompt open instead of clamping, with "Type a page between 1 and N" in the danger color on the existing hint row.
 - Rendering runs off the UI thread at the device scale factor times the zoom. Visible pages render first, then one page above and below. A page not yet rendered at the current scale shows its previous bitmap scaled while the new one is produced, or the page background when there is none. The bitmap cache is bounded to the visible pages plus prefetch and at most 256 MiB per window; older entries are evicted first. The longest rendered edge is capped at 4096 px, the same texture cap images use; beyond that the page is rendered at the cap and scaled up on screen.
 - Every render result carries the request generation it was computed for; a result for a stale scale or a replaced document is dropped.
 - The status bar shows `Page X of N` on the left (click for go-to-page) and the zoom percentage on the right; the file type shows `PDF`. Pages are painted on the theme background with a page shadow from the theme palette; the paper itself is the PDF's own white.
@@ -150,16 +156,16 @@ Schema results are pushed through the public `DiagnosticSet` on `EditorState` as
 
 - The text layer is built in the background as soon as the document opens: every text item per page with its box in page coordinates. The status bar shows `Indexing…` while it runs on a long document and search is answered for pages already indexed.
 - Boxes map to the rendered page through the page's visible box (`CropBox` intersected with `MediaBox`) and rotation, so highlights and selection sit on the glyphs they name.
-- Search: `Edit > Find…` (Cmd/Ctrl+F) opens a find bar at the top of the pages. Matching is incremental as the query changes and case-insensitive; ligatures (`ﬁ`, `ﬂ`, and the rest of the Alphabetic Presentation Forms block) are folded, diacritics are folded, whitespace runs collapse, and a hyphen at a line end joins the split word so `configuration` matches `configu-` + `ration`. Every match on every visible page is highlighted; the current match is distinct. The bar shows `X of N` (`No matches` when none). Cmd/Ctrl+G and Shift+Cmd/Ctrl+G step forward and back, as do Enter and Shift+Enter in the find bar, scrolling the current match into view. Cmd/Ctrl+G with no matches opens the find bar. Escape closes the bar, clears the highlights, and keeps the scroll position. A results list under the bar shows one row per match with its page number and a line of context; clicking a row makes it the current match.
-- Selection: click and drag selects text in reading order across page boundaries; Shift+click extends; double-click selects a word; Cmd/Ctrl+A selects the whole document. Cmd/Ctrl+C copies the selected text with one line break per text line and one blank line per page boundary. The selection paints as a translucent accent over the glyph boxes.
+- Search: `Edit > Find…` (Cmd/Ctrl+F) opens a find bar at the top of the pages. Matching is incremental as the query changes and case-insensitive; ligatures (`ﬁ`, `ﬂ`, and the rest of the Alphabetic Presentation Forms block) are folded, diacritics are folded, whitespace runs collapse, and a hyphen at a line end joins the split word so `configuration` matches `configu-` + `ration`. Every match on every visible page is highlighted with the theme's warning color at 0.22 opacity, the current match at 0.55. The bar shows `X of N` (`No matches` when none). Cmd/Ctrl+G and Shift+Cmd/Ctrl+G step forward and back, as do Enter and Shift+Enter in the find bar, scrolling the current match into view with a top offset of the find panel's height plus 24 px, capped at 80% of the viewport height. Cmd/Ctrl+G with no matches opens the find bar. Escape closes the bar, clears the highlights, and keeps the scroll position. A results list under the bar shows one fixed 28 px row per match with its page number and a line of context, up to eight whole rows at once; clicking a row makes it the current match.
+- Selection: click and drag selects text in reading order across page boundaries; Shift+click extends; double-click selects a word; Cmd/Ctrl+A selects the whole document. Cmd/Ctrl+C copies the selected text with one line break per text line and one blank line per page boundary. The selection paints over the glyph boxes with the theme's selection color, the same token as the editor.
 - Search and selection operate on the text layer only. Scanned pages stay viewable and have no text; OCR is out of scope.
 
 #### PDF to Markdown
 
 One PDF window holds three views of the same document: the pages, the generated Markdown as a preview, and that Markdown in the editor. Two title bar icons move between them:
 
-- **PDF** returns to the pages.
-- **Markdown** generates the Markdown the first time it is used, then moves between preview and editor: a pencil while previewing, an eye while editing. `File > Convert to Markdown` (Cmd/Ctrl+Shift+M) does the same thing as the icon; `View > PDF Pages` (Cmd/Ctrl+Shift+P) returns to the pages; Cmd/Ctrl+Shift+E toggles preview and editor once the Markdown exists.
+- **PDF** returns to the pages, with the tooltip "PDF Pages".
+- **Markdown** generates the Markdown the first time it is used ("Convert to Markdown"), then moves between preview and editor: a pencil ("Edit") while previewing, an eye ("Preview") while editing, and `book-open-text` ("Show the Markdown") from the pages once Markdown exists. `File > Convert to Markdown` (Cmd/Ctrl+Shift+M) does the same thing as the icon; `View > PDF Pages` (Cmd/Ctrl+Shift+P) returns to the pages; Cmd/Ctrl+Shift+E toggles preview and editor once the Markdown exists.
 
 The Markdown icon is disabled until the document has loaded and shows a working state while a generation runs; a second click cancels.
 
@@ -167,7 +173,7 @@ The Markdown icon is disabled until the document has loaded and shows a working 
 
 - Generation runs off the UI thread through `pdf-inspector` with headings, lists, code blocks, bold, italic, links, tables, header and footer stripping, hyphenation repair, and page-number removal enabled. The status bar reads `Generating…` during text extraction and `Rendering figures… X of N` while figures are produced. Cancel takes effect between figures; a cancelled result is dropped.
 - The Markdown is written immediately, beside the PDF, with the same name and a `.md` extension (`paper.pdf` gives `paper.md`). A name already taken by a file OpenIt did not write in this session gets a number (`paper-2.md`), so nothing of the user's is overwritten. Regenerating replaces the file OpenIt wrote.
-- Figures: every image placeholder the converter emits is replaced by a rendered crop of that region of the page (through hayro at twice the page's point size, capped at 2048 px on the longest edge, with 4 pt of slack so labels beside the artwork come along), so raster and vector figures both come through. The crops are written to a sibling folder named after the file (`paper-images/p003-01.png`: page, figure index) and linked relatively.
+- Figures: every image placeholder the converter emits is replaced by a rendered crop of that region of the page (through hayro at twice the page's point size, capped at 2048 px on the longest edge, with 4 pt of slack so labels beside the artwork come along), so raster and vector figures both come through. The crops are written to a sibling folder named after the file (`paper-images/p003-01.png`: page, figure index) and linked relatively. When the output stem changes, only this conversion's own `![Figure](...)` links are retargeted; ordinary links and other image links stay unchanged.
 - A folder that cannot be written (a read-only disk, a document opened from a mounted image) sends the file and its figures to `<temp>/openit/<stem>.md` instead, and the status bar names the location.
 - The status bar reports where the file landed (`Saved paper.md`), and adds `N pages skipped (no text)` when the document had pages the converter could not read.
 
@@ -175,7 +181,7 @@ The Markdown icon is disabled until the document has loaded and shows a working 
 
 - The generated file is an ordinary document from that moment on: the preview and the editor are the same surfaces every Markdown document uses, with syntax highlighting, find and replace, undo, and the go-to-line prompt, and Cmd/Ctrl+S saves it. Autosave, draft recovery, and external-change detection apply to it exactly as they do to a Markdown window.
 - The window's title bar shows the PDF's name in the PDF view and the Markdown file's name, with the dirty marker, in the other two.
-- The status bar belongs to whichever view is showing: page position and zoom for the pages, line and column and the language for the editor.
+- The status bar belongs to whichever view is showing: page position and zoom for the pages, line and column and the language for the editor. Returning to the pages clears the Markdown save notice.
 - Closing the window with unsaved Markdown edits offers Save, Discard, and Cancel, the same as closing any dirty document. The PDF itself is never modified.
 - Relaunching after a quit with unsaved edits restores the Markdown document in its own window, because it is a file of its own; the PDF window restores separately.
 
@@ -197,11 +203,11 @@ Faithful for text-heavy documents (papers, manuals, reports). Tables are best-ef
 
 #### Viewing
 
-- Open fitted to the window. Zoom in and out (Cmd/Ctrl+Plus, Cmd/Ctrl+Minus, scroll wheel with Cmd/Ctrl, pinch), fit (Cmd/Ctrl+0), actual size (Cmd/Ctrl+1), pan by dragging when the image exceeds the viewport.
-- Dimensions and format come from the original file header, not the decoded texture. The status bar shows `W x H · FORMAT · size`, the frame count for animations, and the zoom percentage on the right.
-- Decoding runs off the UI thread under the existing byte and pixel limits. The texture is capped at 4096 px on the longest edge; larger images are downsampled for display and actual size is exact only up to that cap. The original dimensions are still reported from the header.
+- Open fitted to the window. Zoom in and out (Cmd/Ctrl+Plus, Cmd/Ctrl+Minus, scroll wheel with Cmd/Ctrl, pinch), fit (Cmd/Ctrl+0), actual size (Cmd/Ctrl+1), pan by dragging when the image exceeds the viewport. SVG 100% uses the document's nominal dimensions, not its denser rasterized texture.
+- Dimensions and format come from the original file header, not the decoded texture; dimensions used by the status bar and export source reflect EXIF orientation. The status bar shows `W x H · FORMAT · size`, the frame count for animations, and the zoom percentage on the right.
+- Decoding runs off the UI thread under the existing byte and pixel limits. The texture is capped at 4096 px on the longest edge; larger images are downsampled for display and raster actual size is exact only up to that cap. The original dimensions are still reported from the header.
 - Until the first decode lands, the viewer shows `Opening <name>…` centered in place of the image.
-- Background: white, black, or checkerboard. Default: checkerboard when the image has an alpha channel or is an SVG, otherwise the theme background. The choice is per window and not persisted. The checkerboard is painted in screen space (8 px cells in two theme-derived greys) so it stays sharp at every zoom. A swatch icon in the title bar cycles it; `View > Image Background` holds the same states as radios.
+- Background: white, black, or checkerboard. Default: checkerboard when the image has an alpha channel or is an SVG, otherwise the theme background. The choice is per window and not persisted. The checkerboard is painted in screen space (8 px cells in two theme-derived greys, 0.2 apart in lightness and shifted inward near white or black) so it stays sharp at every zoom. A swatch icon in the title bar cycles it; its tooltip names the current and next backgrounds and refreshes on the next mouse move after a change. `View > Image Background` holds the same states as radios, checked for the frontmost image window.
 - Panning stops at the image: one that fits the window stays centered, and a larger one stops when its edge reaches the window edge.
 
 #### Editing
@@ -216,13 +222,14 @@ Faithful for text-heavy documents (papers, manuals, reports). Tables are best-ef
 
 #### Export
 
-`File > Export...` (Cmd/Ctrl+Shift+S) opens one dialog and never changes the open document:
+`File > Export...` (Cmd/Ctrl+Shift+S) opens one dialog and never changes the open document. The panel is 560 px wide, constrained to the window, with all formats on one row. Its header and footer stay fixed while the options scroll; its height leaves room above the image window's status bar, keeping Output, Cancel, and Export reachable.
 
-- Format: PNG, JPEG (with quality), WebP lossless, BMP, TIFF, GIF.
-- Size: width and height with aspect lock, presets Original, 50%, 1080p (fit inside 1920 x 1080), and Custom. SVG rasterizes at the requested size directly; raster images resample with Lanczos3.
+- Format: PNG, JPEG (with quality), WebP lossless, BMP, TIFF, GIF. A permanent Quality row accepts 1 to 100 for JPEG, default 85; it is disabled for other formats and retains the value across format switches.
+- Size: width and height with aspect lock, presets Original, 50%, 1080p (fit inside 1920 x 1080), and Custom. Pixels and Lock aspect are disabled for Original. The 1080p fields show the fitted output size under Fit inside and 1920 x 1080 under Exact size. SVG rasterizes at the requested size directly; raster images resample with Lanczos3.
 - Background: transparent (formats with alpha), white, black.
-- Advanced (collapsed by default): sizing rule `Fit inside` (default) or `Exact size`; metadata `Strip` (default) or `Keep ICC profile`.
-- The dialog shows the output pixel size, then the platform save prompt. Encoding runs off the UI thread; the window reports success or failure in place.
+- Advanced (collapsed by default): sizing rule `Fit inside` (default) or `Exact size`; metadata `Strip` (default) or `Keep ICC profile`. A chevron shows the expanded state, and 80 px remains reserved for the rows so toggling the section does not move the footer.
+- The dialog shows the output pixel size, then the platform save prompt. Encoding runs off the UI thread; the status bar reports `Exported <name>` on success or the failure in place.
+- The dialog takes focus on open; Escape or Cancel closes it and returns focus to the image. The native Save and Export panels also return focus to the image when they finish.
 
 ### Failure behavior
 
@@ -256,14 +263,14 @@ One theme is in effect for the whole application: one theme for every window, ap
 
 - `mode = "system"` (default) follows the window appearance from the OS: dark appearances apply the `dark` theme id, light appearances the `light` id. The switch is live, without restart.
 - `mode = "light"` or `"dark"` pins that kind regardless of the OS.
-- Defaults: `light = "warm-burnout-light"`, `dark = "warm-burnout-dark"`. An unknown id falls back to the default of its kind; the settings file is left as written.
+- Defaults: `light = "warm-burnout-light"`, `dark = "warm-burnout-dark"`. An unknown id falls back to the default of its kind; if no catalog theme resolves, a built-in palette and configuration of that kind still populate `ActivePalette`. The settings file is left as written.
 - The OS accent color is not used. GPUI exposes no accent API, and a theme needs a whole palette to keep contrast, so one foreign color would not compose with it.
 
 ### Menu
 
 View > Appearance holds System, Light, Dark (radio). Choosing one writes `mode` to the settings file.
 
-View > Color Theme..., Cmd/Ctrl+K Cmd/Ctrl+T, and the palette button in the title bar open the theme picker: a command palette listing the dark and light themes (the OS kind first) with live preview while moving; Enter writes the pick as the `light` or `dark` id and, when the pick is of the other kind than the one shown, pins `mode` to that kind; Escape restores the configured theme.
+View > Color Theme..., Cmd/Ctrl+K Cmd/Ctrl+T, and the palette button in the title bar open the theme picker: a command palette listing the themes under "Light Themes" and "Dark Themes" (the OS kind first) with live preview while moving; Enter writes the pick as the `light` or `dark` id and, when the pick is of the other kind than the one shown, pins `mode` to that kind; Escape closes even with a query typed and restores the configured theme.
 
 View > Font is the submenu for UI Font and Code Font. View > Font > UI Font... and Cmd/Ctrl+K Cmd/Ctrl+U open the UI Font picker; View > Font > Code Font... and Cmd/Ctrl+K Cmd/Ctrl+C open the Code Font picker. Each picker lists the fonts installed on the machine with live preview while moving; Enter writes that family; Escape restores the saved pair.
 
@@ -289,11 +296,11 @@ One resolver in the document library decides every document resource: local path
 
 ### Decision order
 
-Local file, then cache, then allowlist. Anything else shows the nonblocking permission bar with three choices: allow this domain family (persisted; it covers the family's subdomains), Not now (the document stops asking for the pending families and keeps their placeholders; nothing is saved), or Always allow…, which asks once more in the bar before setting `allow_remote`. Denied resources are never fetched or cached. Multiple resources from one family collapse into one prompt.
+Local file, then cache, then allowlist. Anything else shows the nonblocking permission bar with three choices: allow this domain family (persisted; it covers the family's subdomains), Not now (the document stops asking for the pending families and keeps their placeholders; nothing is saved), or Always allow…, which asks once more in the bar before setting `allow_remote`. Escape backs out of that confirmation without granting access. The bar uses the status bar's text size, and its buttons have a border at rest. Denied resources are never fetched or cached. Multiple resources from one family collapse into one prompt.
 
 ### Markdown images
 
-Images load through a per-document `ImageCache` installed as an ancestor of the `TextView`. GPUI consults it before its shared default loader, so the cache resolves the original URL against the document base and authorizes it before any fetch. Markdown source is never rewritten, which preserves source positions.
+Images load through a per-document `ImageCache` installed as an ancestor of the `TextView`. GPUI consults it before its shared default loader, so the cache resolves the original URL against the document base and authorizes it before any fetch. A fetch or decode failure shows the same placeholder as a denied image rather than an empty gap. Markdown source is never rewritten, which preserves source positions.
 
 ### SVG
 
@@ -308,6 +315,10 @@ SVG images from documents show a placeholder. The resolver security limitation a
 ### Open requests
 
 Every entry point produces an open request: Finder or Explorer open, `openit <path>...`, drag onto icon or window, Cmd/Ctrl+O, Cmd/Ctrl+N from clipboard, and relaunch recovery. A path already open focuses its window instead of opening a duplicate. A path the readers refuse goes to the system's default application instead of a window, per [System handoff](system-handoff.md). Every other request ends in its own window.
+
+Clipboard text from Cmd/Ctrl+N or a paste into the empty window is detected as JSON when it is a valid object or array, otherwise as Markdown when its syntax score reaches two: a fence or table rule counts two; a heading, two or more list items, a quote, a link, and bold each count one. Everything else opens as plain text. The detected type uses the same opening mode as a file, and the language picker permits an override.
+
+New document windows cascade 28 px right and down from the frontmost window on its display. A step that would run off the display wraps to 28 px inside its top-left corner; with no frontmost window, the first window is centered.
 
 ### Command line
 
@@ -325,11 +336,13 @@ The title bar file name and Cmd/Ctrl+P open a fuzzy picker over the open documen
 
 One title bar drawn by the application beside the traffic lights (gpui-component `TitleBar`, transparent system title bar): file name with the dirty marker, then the content actions on the right as bare icons (mode toggle for Markdown, rotate left and background cycle for images, PDF and Markdown views for PDFs). Clicks on those icons stop there, so the bar's own double-click does not zoom the window. The theme picker is reached from the View menu and Cmd/Ctrl+K Cmd/Ctrl+T, not from an icon. The icons carry no frame at rest; a rounded fill appears on hover and deepens while pressed, and each one shows a tooltip naming what a click does with its shortcut, drawn the platform's way (`⇧⌘E` on macOS, `Ctrl+Shift+E` elsewhere). The file name's tooltip names Go to File and its shortcut. The tooltips are mounted by the window, because gpui-component routes its own through the `Root` OpenIt does not use. The bar is filled flat with the theme's title bar color, overriding the toolkit's default gradient, so it reads the same in every theme. No second toolbar row. Menus and shortcuts hold everything else.
 
-The status bar shows metadata on the left and the file type on the right. For text: line/column while editing (click opens the go-to-line prompt: `line[:column]`, prefilled with the current position, showing "Current Line: X of N"), absent in preview, which has no caret and the language name (click opens the language palette listing every compiled-in grammar; the pick changes highlighting for the session and decides whether the document offers Markdown preview). JSON-family documents show the schema name, or "No schema", muted left of the language name; a click opens the picker. Never a count, never danger or warning color. Images show dimensions, format, file size, and frame count on the left and the zoom percentage on the right. PDFs show `Page X of N` on the left (click opens the go-to-page prompt), indexing and generation progress beside it, and the zoom percentage on the right; a PDF window showing its generated Markdown shows that document's own readouts instead.
+The status bar shows metadata on the left and the file type on the right. For text: line/column while editing (click opens the go-to-line prompt: `line[:column]`, prefilled with the current position, showing "Current Line: X of N"), absent in preview, which has no caret and the language name (click opens the language palette listing compiled-in grammars except the injection-only `markdown_inline` and `jsdoc`; the pick changes highlighting for the session and decides whether the document offers Markdown preview). Labels include GraphQL, CMake, and Protocol Buffers; the current language is preselected and scrolled into view, and Escape closes even with a query typed. JSON-family documents show the schema name, or "No schema", muted left of the language name; a click opens the picker. Never a count, never danger or warning color. Images show dimensions, format, file size, and frame count on the left and the zoom percentage on the right. PDFs show `Page X of N` on the left (click opens the go-to-page prompt), indexing and generation progress beside it, and the zoom percentage on the right; a PDF window showing its generated Markdown shows that document's own readouts instead.
 
-The bar floats over the text while editing, where a translucent strip reads well against a scrolling buffer. In every other view it takes its own opaque row, so an image, a page, or a rendered document is never covered by it. Markdown preview hides the status bar and editing shows it. `View > Always Show Status Bar` (`always_show_status_bar`, default `false`) pins it visible in both. A source warning, a save error, or a settings error shows it regardless of mode or setting.
+The bar floats at the bottom while editing, with a translucent strip; the editor reserves one bar height below its viewport, so typing, go-to-line, and revealed matches cannot land underneath it, and the bar blocks clicks through to the editor. In every other view it takes its own opaque row, so an image, a page, or a rendered document is never covered by it. Markdown preview hides the status bar and editing shows it. `View > Always Show Status Bar` (`always_show_status_bar`, default `false`) pins it visible in both. A source warning, a save error, or a settings error shows it regardless of mode or setting.
 
-Native menus: `OpenIt` (Install Command Line Tools... (macOS), Check for Updates..., Quit Cmd/Ctrl+Q), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for text, Markdown preview, and PDFs), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Option+Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). On macOS an item the focused window cannot act on is disabled. The binary is named `OpenIt` so the platform shows that name in the application menu.
+Floating picker and shared dialog borders mix the theme border 30% toward the foreground in dark themes, keeping their edges visible without changing light-theme borders.
+
+Native menus: `OpenIt` (Install Command Line Tools... (macOS), Check for Updates..., Quit Cmd/Ctrl+Q), `File` (New from Clipboard Cmd/Ctrl+N, Open... Cmd/Ctrl+O, Go to File... Cmd/Ctrl+P, Close Window, Save, Export... Cmd/Ctrl+Shift+S for images, Convert to Markdown Cmd/Ctrl+Shift+M for PDFs), `Edit` (Undo, Redo, Cut, Copy, Paste, Select All as OS actions; Find... Cmd/Ctrl+F for text, Markdown preview, and PDFs; Select Next Occurrence Cmd/Ctrl+D in the editor), `View` (Toggle Preview / Edit, Always Show Status Bar, Markdown Preview Width, Image Background, Zoom In, Zoom Out, Fit, Actual Size, Go to Page... Option+Cmd/Ctrl+G and PDF Pages Cmd/Ctrl+Shift+P for PDFs, Appearance, Color Theme...), `Tools` (Rotate Left, Rotate Right, Flip Horizontal, Flip Vertical for images). On macOS an item the focused window cannot act on is disabled. The binary is named `OpenIt` so the platform shows that name in the application menu.
 
 ### Settings
 
@@ -341,7 +354,7 @@ Markdown preferences use `markdown_preview_width` (`readable` | `wide` | `full_w
 
 Packaged builds check GitHub Releases through cargo-packager-updater. The manifest is `https://github.com/felipefdl/openit/releases/latest/download/latest.json`. Bundles are minisign-verified with the packager public key. Debug builds never check on their own.
 
-`OpenIt > Check for Updates...` opens the Updates modal in the current window and checks immediately. The modal shows the running version, whether a newer package exists, download progress, and a Check automatically checkbox. Install downloads, verifies, and relaunches.
+`OpenIt > Check for Updates...` opens the Updates modal in the current window and checks immediately. The modal shows the running version, whether a newer package exists, download progress, and an Automatically check for updates checkbox directly below the detail text. Its height stays fixed, with spare space above the buttons. Install downloads, verifies, and relaunches.
 
 `auto_check_updates` is the opt-in. When it is on, a packaged app checks once a few seconds after launch. An available update opens the same modal. Up to date and failed automatic checks stay silent aside from a log line. Checking never runs until the user asks or opts in.
 
@@ -381,8 +394,8 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 
 ## References
 
-- gpui-component `EditorState`: https://docs.rs/gpui-component/0.7.0/gpui_component/input/type.EditorState.html
-- gpui-component `TextViewState`: https://docs.rs/gpui-component/0.7.0/gpui_component/text/struct.TextViewState.html
+- gpui-component `EditorState`: https://docs.rs/gpui-component/0.8.1/gpui_component/input/type.EditorState.html
+- gpui-component `TextViewState`: https://docs.rs/gpui-component/0.8.1/gpui_component/text/struct.TextViewState.html
 - hayro: https://docs.rs/hayro/latest/hayro/
 - hayro-syntax `Page`: https://docs.rs/hayro-syntax/latest/hayro_syntax/page/struct.Page.html
 - pdf-inspector Rust API: https://github.com/firecrawl/pdf-inspector/blob/main/docs/rust-api.md
@@ -421,3 +434,7 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-09-14: Updates: `OpenIt > Check for Updates...` opens a modal that checks GitHub Releases; `auto_check_updates` is opt-in and does not run on launch until enabled. Publish writes `latest.json`.
 - 2026-09-15: PDF Cmd/Ctrl+G is Find Next (Shift for previous); Go to Page moves to Option+Cmd/Ctrl+G. Cmd/Ctrl+V on the empty window opens the clipboard the same way as New from Clipboard. The empty-window line reads "or drag and drop a file, or paste".
 - 2026-10-04: gpui-kit 0.7.0, hayro 0.8, and current dependencies. Find in the Markdown preview (folded, highlighted, revealed) and Edit > Find reaching the editor's search; permission bar adds Not now and confirms Always allow; PDF and image windows say `Opening <name>…` until content lands; Ctrl+Q quits; tooltips draw shortcuts the platform's way. Markdown heading colors and predefined CJK CMaps are no longer blocked upstream. Fixed: a settings change (a mode toggle, theme, or width) while a Markdown image was loading or waiting for permission aborted the app; the image cache now notifies the view that owns it instead of asking the window mid-event.
+- 2026-10-22: gpui-kit 0.8.0 (gpui-pre 0.3.9), jsonschema 0.60, and current dependencies. Edit > Select Next Occurrence (Cmd/Ctrl+D) and Ctrl+Space schema completions are no longer blocked upstream. resvg stays at 0.46 and ropey at 2.0.0-beta.1 because gpui still pins both.
+- 2026-10-22: UI/UX pass covers editor and preview find, keyboard reading, saved-state tracking, picker selection and dismissal, schema diagnostics and completions, image viewing and export, PDF prompts and conversion, permission controls, clipboard detection, window cascade, and shell dialogs.
+- 2026-10-28: One find bar everywhere: the editor drops gpui-kit's search panel for the same centered card as the preview and PDFs, with a case toggle and a replace row driven through gpui-kit's custom-search API. Local schemas in folders with spaces validate.
+- 2026-10-28: gpui-kit 0.8.1 (gpui-pre 0.3.10), jsonschema 0.60.2, uuid 1.29, interprocess 2.4.7, notify 8.2.1, and current dependencies; the duplicate wgpu 29, naga 29, taffy, and cocoa copies leave the tree. Scroll handling follows gpui's rename to `ScrollEvent`/`on_scroll`. resvg stays at 0.46 and ropey at 2.0.0-beta.1 because gpui still pins both.

@@ -202,7 +202,10 @@ impl DocumentSchemaCache {
         if self.compiled.is_none()
           && let SchemaDocs::Ready(documents) = self.documents()
         {
-          self.compiled = CompiledSchema::get_or_compile(None, &documents).ok().map(Arc::new);
+          match CompiledSchema::get_or_compile(None, &documents) {
+            Ok(compiled) => self.compiled = Some(Arc::new(compiled)),
+            Err(error) => tracing::warn!(?error, root = %documents.root, "schema did not compile"),
+          }
         }
         false
       },
@@ -581,9 +584,14 @@ fn display_resolved(resolved: &Resolved) -> String {
   }
 }
 
+/// The registry URI of a schema document. A local file is a `file:` URL, so a
+/// path with a space or another character a URI cannot hold still compiles,
+/// and relative `$ref`s resolve against it the same way.
 fn schema_uri(key: &SchemaKey) -> String {
   match key {
-    SchemaKey::Local(path) => path.to_string_lossy().into_owned(),
+    SchemaKey::Local(path) => {
+      url::Url::from_file_path(path).map_or_else(|()| path.to_string_lossy().into_owned(), String::from)
+    },
     SchemaKey::Remote(url) => url.clone(),
   }
 }

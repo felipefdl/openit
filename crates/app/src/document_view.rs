@@ -1,5 +1,6 @@
 use crate::actions::{
-  CloseWindow, CodeFont, ColorTheme, Find, GoToFile, NextMatch, PreviousMatch, Save, ToggleMode, UiFont,
+  CloseWindow, CodeFont, ColorTheme, Find, GoToFile, NextMatch, PreviewBottom, PreviewLineDown, PreviewLineUp,
+  PreviewPageDown, PreviewPageUp, PreviewTop, PreviousMatch, Save, SelectNextOccurrence, ToggleMode, UiFont,
 };
 use crate::drop::{apply_external_paths, external_paths_ring};
 use crate::find_bar::{FindBar, FindBarEvent};
@@ -26,11 +27,13 @@ use gpui_kit::component::text::{
 use gpui_kit::component::{ActiveTheme, Icon, IconName, TitleBar};
 use gpui_kit::prelude::{FluentBuilder, InteractiveElement, StatefulInteractiveElement};
 use gpui_kit::{
-  AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, IntoElement, MouseButton,
-  ParentElement, PathPromptOptions, PromptLevel, Render, SharedString, Styled, Subscription, Task, Window, div,
+  AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent,
+  MouseButton, ParentElement, PathPromptOptions, PromptLevel, Render, SharedString, Styled, Subscription, Task, Window,
+  div,
 };
 use openit_core::document::{Loaded, Revision, Snapshot};
 use openit_core::kind::DocumentKind;
+use openit_core::occurrence;
 use openit_core::recovery::Draft;
 use openit_core::resource::DomainFamily;
 use openit_core::schema::{self, JsonFamily};
@@ -77,6 +80,25 @@ fn rope_to_string(rope: &Rope) -> String {
   text.extend(rope.chunks());
   text
 }
+
+/// How far the preview moves, from the keyboard.
+#[derive(Clone, Copy)]
+enum PreviewScroll {
+  /// One step, `1.` down or `-1.` up.
+  Line(f32),
+  /// One screen, `1.` down or `-1.` up.
+  Page(f32),
+  Top,
+  Bottom,
+}
+/// One arrow-key step of the preview, in logical pixels.
+const PREVIEW_LINE: f32 = 48.;
+/// What a page step keeps of the previous screen, in logical pixels.
+const PREVIEW_PAGE_OVERLAP: f32 = 48.;
+/// How long a preview reveal gets to scroll before the find bar's margin is applied to it.
+const PREVIEW_REVEAL_SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+/// Editor line height assumed before its first layout, for the find bar's reveal margin.
+const FIND_FALLBACK_LINE_HEIGHT: f32 = 20.;
 
 fn schema_settings_key(path: &Path) -> Option<String> {
   if path.as_os_str().is_empty() {
@@ -142,6 +164,17 @@ impl Render for CursorStatus {
   }
 }
 
+/// Cmd/Ctrl+D progress: the selection the run started from and the occurrence
+/// it added last. Valid while that selection stays active and the text is
+/// unchanged.
+struct OccurrenceRun {
+  origin: Range<usize>,
+  last: Range<usize>,
+  /// Started from a bare caret, so only whole words match.
+  whole_word: bool,
+  revision: Revision,
+}
+
 pub struct DocumentView {
   pub(crate) session: DocumentSession,
   mode: Mode,
@@ -153,6 +186,8 @@ pub struct DocumentView {
   preview_revision: Option<Revision>,
   preview_observation: Option<Subscription>,
   editor_subscription: Option<Subscription>,
+  /// Keeps the editor search panel from re-selecting a query as it is typed.
+  editor_search_observation: Option<Subscription>,
   cursor_status_view: Option<Entity<CursorStatus>>,
   requests_observation: Option<Subscription>,
   settings_store_observation: Option<Subscription>,
@@ -172,7 +207,7 @@ pub struct DocumentView {
   pub(crate) requests: Entity<PermissionRequests>,
   overlay: Option<Overlay>,
   overlay_subscription: Option<Subscription>,
-  /// The preview's find bar. Edit mode uses the editor's own search instead.
+  /// The find bar, over the preview or the editor.
   find: Option<Entity<FindBar>>,
   find_subscription: Option<Subscription>,
   find_query: String,
@@ -181,6 +216,10 @@ pub struct DocumentView {
   find_current: Option<usize>,
   /// The rendered text last searched, so a reparse searches again.
   find_searched: Option<RenderedText>,
+  /// Pending correction that lifts a preview match out from under the find bar.
+  find_reveal_task: Option<Task<()>>,
+  /// The running Cmd/Ctrl+D selection, if any.
+  occurrence_run: Option<OccurrenceRun>,
   /// What the permission bar is asking.
   permission_prompt: PermissionPrompt,
   /// Highlighting language chosen from the status bar, over the detected one.
@@ -215,6 +254,7 @@ impl DocumentView {
       preview_revision: None,
       preview_observation: None,
       editor_subscription: None,
+      editor_search_observation: None,
       cursor_status_view: None,
       requests_observation: None,
       settings_store_observation: None,
@@ -240,10 +280,13 @@ impl DocumentView {
       find_matches: Vec::new(),
       find_current: None,
       find_searched: None,
+      find_reveal_task: None,
+      occurrence_run: None,
       permission_prompt: PermissionPrompt::Families,
       language_override: None,
       embedded: false,
     };
+    view.session.saved_text = view.initial_text.clone();
     view.requests_observation = Some(cx.observe_in(&requests, window, |this, requests, window, cx| {
       let answers = requests.update(cx, |requests, _| requests.take_answers());
       this.pending_answers.extend(answers);
@@ -350,6 +393,13 @@ impl DocumentView {
     cx.notify();
     view
   }
+  /// Open clipboard text as an untitled document. It starts dirty like a
+  /// restored draft, but nothing was recovered.
+  pub fn from_clipboard(draft: Draft, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let mut view = Self::restore(draft, kind, window, cx);
+    view.session.restored = false;
+    view
+  }
   /// Open a document that another view hosts: it draws its own body, status
   /// bar, and overlays, but not the window title bar or the close guard.
   pub fn open_embedded(path: PathBuf, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -400,7 +450,7 @@ impl DocumentView {
     let answer = window.prompt(
       PromptLevel::Warning,
       &format!("Save changes to {}?", self.title()),
-      Some("Discard removes the recovered draft as well."),
+      Some(self.session.close_prompt_detail()),
       &["Save", "Discard", "Cancel"],
       cx,
     );
@@ -531,7 +581,7 @@ impl DocumentView {
     let answer = window.prompt(
       PromptLevel::Warning,
       &format!("Save changes to {}?", self.title()),
-      Some("Discard removes the recovered draft as well."),
+      Some(self.session.close_prompt_detail()),
       &["Save", "Discard", "Cancel"],
       cx,
     );
@@ -616,6 +666,8 @@ impl DocumentView {
         .line_number(true)
         .soft_wrap(self.is_markdown())
         .tab_size(TabSize { tab_size: 2, hard_tabs: false })
+        // OpenIt's find bar drives the search; the editor's own panel stays hidden.
+        .searchable(false)
         .default_value(text);
       if let Some(name) = language {
         state = state.language(name);
@@ -641,10 +693,12 @@ impl DocumentView {
           this.session.schedule_checkpoint(cx);
           this.session.schedule_autosave(cx);
           this.schedule_schema_validation(cx);
+          this.clear_dirty_at_saved_text(cx);
           cx.notify();
         }
       }
     }));
+    self.editor_search_observation = Some(cx.observe(&editor, |this, _, cx| this.sync_editor_find_count(cx)));
     self.cursor_status_view = Some(cx.new(|cx| CursorStatus::new(editor.clone(), cx)));
     self.editor = Some(editor.clone());
     editor
@@ -912,6 +966,9 @@ impl DocumentView {
     if !self.is_markdown() {
       return;
     }
+    // The find bar belongs to the surface it searches; it closes before the switch, while that
+    // surface still knows the strip to give back.
+    self.dismiss_find(window, cx);
     let mode = match self.mode {
       Mode::Preview => {
         let editor = self.ensure_editor(window, cx);
@@ -923,9 +980,6 @@ impl DocumentView {
         Mode::Preview
       },
     };
-    if mode == Mode::Edit {
-      self.dismiss_find(cx);
-    }
     self.mode = mode;
     let markdown_mode = match mode {
       Mode::Preview => MarkdownMode::Preview,
@@ -934,22 +988,27 @@ impl DocumentView {
     SettingsStore::update(&mut *cx, |settings| settings.markdown_mode = markdown_mode);
     cx.notify();
   }
-  /// Find in the document. Edit mode opens the editor's own search panel; the
-  /// preview gets the find bar.
+  /// Find in the document: the find bar over the preview, or over the editor,
+  /// where it drives the editor's search and can replace.
   fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-    if self.mode == Mode::Edit {
-      let editor = self.ensure_editor(window, cx);
-      editor.update(cx, |state, cx| {
-        state.focus(window, cx);
-        state.open_search(false, cx);
-      });
-      return;
-    }
     if let Some(find) = &self.find {
       find.update(cx, |find, cx| find.focus(window, cx));
       return;
     }
-    let bar = cx.new(|cx| FindBar::new(window, cx));
+    let bar = if self.mode == Mode::Edit {
+      let editor = self.ensure_editor(window, cx);
+      let selected = editor.read(cx).selected_text().to_string();
+      // A selection within one line seeds the query, as the editor's own panel did.
+      let seed = if selected.contains('\n') {
+        String::new()
+      } else {
+        selected
+      };
+      self.find_query.clone_from(&seed);
+      cx.new(|cx| FindBar::for_editor(&seed, false, window, cx))
+    } else {
+      cx.new(|cx| FindBar::new(window, cx).in_corner())
+    };
     self.find_subscription =
       Some(
         cx.subscribe_in(&bar, window, |view, _, event: &FindBarEvent, window, cx| match event {
@@ -959,33 +1018,101 @@ impl DocumentView {
           },
           FindBarEvent::Pick(index) => view.set_find_current(Some(*index), cx),
           FindBarEvent::Close => view.close_find(window, cx),
+          FindBarEvent::CaseToggled => view.run_find(cx),
+          FindBarEvent::ReplaceToggled => view.fit_find_margin(window, cx),
+          FindBarEvent::Replace(replacement) => view.replace_match(replacement, false, window, cx),
+          FindBarEvent::ReplaceAll(replacement) => view.replace_match(replacement, true, window, cx),
         }),
       );
     self.find = Some(bar);
+    self.fit_find_margin(window, cx);
+    if self.mode == Mode::Edit && !self.find_query.is_empty() {
+      self.run_find(cx);
+    }
     cx.notify();
   }
 
+  /// Open the find bar with its replace row. The editor only.
+  fn open_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.mode != Mode::Edit {
+      return;
+    }
+    self.open_find(&Find, window, cx);
+    if let Some(find) = self.find.clone() {
+      find.update(cx, |find, cx| find.open_replace(window, cx));
+    }
+  }
+
   fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.dismiss_find(cx);
-    window.focus(&self.focus, cx);
+    self.dismiss_find(window, cx);
+    match (&self.mode, &self.editor) {
+      (Mode::Edit, Some(editor)) => editor.update(cx, |state, cx| state.focus(window, cx)),
+      _ => window.focus(&self.focus, cx),
+    }
     cx.notify();
   }
 
   /// Drop the find bar, its matches, and their highlights.
-  fn dismiss_find(&mut self, cx: &mut Context<Self>) {
+  fn dismiss_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.find = None;
     self.find_subscription = None;
     self.find_query.clear();
     self.find_matches.clear();
     self.find_current = None;
     self.find_searched = None;
+    self.find_reveal_task = None;
     if let Some(preview) = &self.preview {
       preview.update(cx, TextViewState::clear_range_highlights);
     }
+    if let Some(editor) = &self.editor {
+      editor.update(cx, |state, cx| {
+        state.close_search(cx);
+        state.set_cursor_surrounding_lines(None, window, cx);
+      });
+    }
   }
 
-  /// Search the preview's rendered text for the query and highlight every match.
+  /// The find bar floats over the editor's top lines. While it is open, the
+  /// editor keeps that many lines of context around a revealed match or the
+  /// caret, so a match it scrolls to never lands under the bar.
+  fn fit_find_margin(&self, window: &mut Window, cx: &mut Context<Self>) {
+    let (Mode::Edit, Some(find), Some(editor)) = (self.mode, &self.find, &self.editor) else {
+      return;
+    };
+    let height = find.read(cx).height();
+    editor.update(cx, |state, cx| {
+      let line = state.line_height().map_or(FIND_FALLBACK_LINE_HEIGHT, f32::from).max(1.);
+      // Whole lines the bar covers, plus one of air; the bar is at most a few hundred pixels tall.
+      let mut lines = 1_usize;
+      let mut covered = line;
+      while covered < height && lines < 64 {
+        lines += 1;
+        covered += line;
+      }
+      state.set_cursor_surrounding_lines(Some(lines.saturating_add(1)), window, cx);
+    });
+  }
+
+  /// Search for the query: the preview's rendered text, or the editor's buffer.
   fn run_find(&mut self, cx: &mut Context<Self>) {
+    if self.mode == Mode::Edit {
+      let Some(editor) = self.editor.clone() else {
+        return;
+      };
+      let case_sensitive = self.find.as_ref().is_some_and(|find| find.read(cx).case_sensitive());
+      let query = self.find_query.clone();
+      editor.update(cx, |state, cx| {
+        state.set_search_query(query, !case_sensitive, cx);
+        // A new query keeps the match nearest the viewport current but does not scroll to it.
+        // Stepping forward and back lands on the same match and reveals it.
+        if !state.search_session().matcher.is_empty() {
+          state.next_search_match(cx);
+          state.previous_search_match(cx);
+        }
+      });
+      self.sync_editor_find_count(cx);
+      return;
+    }
     let Some(preview) = self.preview.clone() else {
       return;
     };
@@ -994,6 +1121,31 @@ impl DocumentView {
     self.find_searched = Some(text);
     let first = (!self.find_matches.is_empty()).then_some(0);
     self.set_find_current(first, cx);
+  }
+
+  /// Show the editor search's match count and position in the find bar.
+  fn sync_editor_find_count(&self, cx: &mut Context<Self>) {
+    let (Mode::Edit, Some(find), Some(editor)) = (self.mode, self.find.clone(), self.editor.as_ref()) else {
+      return;
+    };
+    let matcher = &editor.read(cx).search_session().matcher;
+    let (total, current) = (matcher.len(), matcher.current());
+    find.update(cx, |find, cx| find.set_count(total, current, cx));
+  }
+
+  /// Replace the current editor match, or all of them.
+  fn replace_match(&self, replacement: &str, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(editor) = self.editor.clone().filter(|_| self.mode == Mode::Edit) else {
+      return;
+    };
+    editor.update(cx, |state, cx| {
+      if all {
+        state.replace_all_search_matches(replacement, window, cx);
+      } else {
+        state.replace_current_search_match(replacement, window, cx);
+      }
+    });
+    self.sync_editor_find_count(cx);
   }
 
   /// Make `index` the current match: paint it stronger, scroll to it, and
@@ -1013,6 +1165,9 @@ impl DocumentView {
         })
         .collect();
       let reveal = current.and_then(|index| self.find_matches.get(index)).cloned();
+      let revealing = reveal.is_some();
+      let list = preview.read(cx).list_state().clone();
+      let before = list.logical_scroll_top();
       preview.update(cx, |state, cx| {
         if let Err(error) = state.set_range_highlights(highlights, cx) {
           tracing::warn!(?error, "preview find highlights rejected");
@@ -1022,6 +1177,22 @@ impl DocumentView {
         {
           tracing::warn!(?error, "preview find reveal rejected");
         }
+      });
+      // A match above the viewport is revealed at its top edge, under the floating find bar.
+      // gpui-base reveals without a margin, so once the reveal has scrolled up, scroll back
+      // by the bar's height to bring the match out from under it.
+      self.find_reveal_task = revealing.then(|| {
+        cx.spawn(async move |this, cx| {
+          cx.background_executor().timer(PREVIEW_REVEAL_SETTLE).await;
+          let _ = this.update(cx, |this, cx| {
+            let after = list.logical_scroll_top();
+            let scrolled_up = (after.item_ix, after.offset_in_item) < (before.item_ix, before.offset_in_item);
+            if scrolled_up && let Some(find) = &this.find {
+              list.scroll_by(-gpui_kit::px(find.read(cx).height()));
+              cx.notify();
+            }
+          });
+        })
       });
     }
     if let Some(find) = self.find.clone() {
@@ -1044,16 +1215,19 @@ impl DocumentView {
   /// to step through, open the search instead.
   fn step_find(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
     if self.mode == Mode::Edit {
+      if self.find.is_none() {
+        self.open_find(&Find, window, cx);
+        return;
+      }
       let editor = self.ensure_editor(window, cx);
       editor.update(cx, |state, cx| {
-        if !state.search_session().is_active() {
-          state.open_search(false, cx);
-        } else if forward {
+        if forward {
           state.next_search_match(cx);
         } else {
           state.previous_search_match(cx);
         }
       });
+      self.sync_editor_find_count(cx);
       return;
     }
     let total = self.find_matches.len();
@@ -1070,6 +1244,132 @@ impl DocumentView {
       current.saturating_sub(1)
     };
     self.set_find_current(Some(next), cx);
+  }
+
+  /// Scroll the preview from the keyboard.
+  fn scroll_preview(&self, scroll: PreviewScroll, cx: &mut Context<Self>) {
+    if self.mode != Mode::Preview {
+      return;
+    }
+    let Some(preview) = &self.preview else {
+      return;
+    };
+    let list = preview.read(cx).list_state().clone();
+    let page =
+      (list.viewport_bounds().size.height - gpui_kit::px(PREVIEW_PAGE_OVERLAP)).max(gpui_kit::px(PREVIEW_LINE));
+    match scroll {
+      PreviewScroll::Line(direction) => list.scroll_by(gpui_kit::px(PREVIEW_LINE) * direction),
+      PreviewScroll::Page(direction) => list.scroll_by(page * direction),
+      PreviewScroll::Top => list.scroll_to(gpui_kit::ListOffset {
+        item_ix: 0,
+        offset_in_item: gpui_kit::px(0.),
+      }),
+      PreviewScroll::Bottom => list.scroll_to_end(),
+    }
+    cx.notify();
+  }
+  fn preview_line_up(&mut self, _: &PreviewLineUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Line(-1.), cx);
+  }
+  fn preview_line_down(&mut self, _: &PreviewLineDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Line(1.), cx);
+  }
+  fn preview_page_up(&mut self, _: &PreviewPageUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Page(-1.), cx);
+  }
+  fn preview_page_down(&mut self, _: &PreviewPageDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Page(1.), cx);
+  }
+  fn preview_top(&mut self, _: &PreviewTop, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Top, cx);
+  }
+  fn preview_bottom(&mut self, _: &PreviewBottom, _: &mut Window, cx: &mut Context<Self>) {
+    self.scroll_preview(PreviewScroll::Bottom, cx);
+  }
+
+  /// An undo back to the text the buffer was saved with clears the dirty
+  /// marker. The length check keeps the common case off the rope compare.
+  fn clear_dirty_at_saved_text(&mut self, cx: &Context<Self>) {
+    let session = &self.session;
+    if session.saving || !session.is_dirty() {
+      return;
+    }
+    let (Some(saved), Some(editor)) = (&session.saved_text, &self.editor) else {
+      return;
+    };
+    let text = editor.read(cx).text();
+    if text.len() != saved.len() || text != saved {
+      return;
+    }
+    let had_draft = self.session.checkpoint_revision.take().is_some();
+    self.session.saved_revision = self.session.revision;
+    if had_draft {
+      self.session.enqueue_draft_removal(cx, false);
+    }
+  }
+
+  /// Add the next occurrence of the selected text as another selection,
+  /// wrapping at the end and stopping once every occurrence is selected. A
+  /// bare caret first selects the word under it; that run then matches whole
+  /// words only. From the search field, the first press selects the current
+  /// search match and moves focus to the editor, so typing edits the selections.
+  fn select_next_occurrence(&mut self, _: &SelectNextOccurrence, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(editor) = self.editor.clone() else {
+      return;
+    };
+    let revision = self.session.revision;
+    if !gpui_kit::Focusable::focus_handle(editor.read(cx), cx).is_focused(window) {
+      let current_match = self.find.as_ref().and_then(|_| {
+        let matcher = &editor.read(cx).search_session().matcher;
+        matcher.current().and_then(|index| matcher.matched_ranges().get(index).cloned())
+      });
+      if let Some(found) = current_match {
+        editor.update(cx, |state, cx| {
+          state.set_selected_range(found, cx);
+          state.focus(window, cx);
+        });
+        let origin = editor.read(cx).selected_range();
+        self.occurrence_run = Some(OccurrenceRun {
+          last: origin.clone(),
+          origin,
+          whole_word: false,
+          revision,
+        });
+        return;
+      }
+    }
+    let previous = self.occurrence_run.take();
+    self.occurrence_run = editor.update(cx, |state, cx| {
+      let selected = state.selected_range();
+      let mut run = match previous.filter(|run| run.revision == revision && run.origin == selected) {
+        Some(run) => run,
+        None if selected.is_empty() => {
+          let word = occurrence::word_at(state.text(), selected.start)?;
+          state.set_selected_range(word, cx);
+          let origin = state.selected_range();
+          return Some(OccurrenceRun {
+            last: origin.clone(),
+            origin,
+            whole_word: true,
+            revision,
+          });
+        },
+        None => OccurrenceRun {
+          origin: selected.clone(),
+          last: selected,
+          whole_word: false,
+          revision,
+        },
+      };
+      let needle = state.text().slice(run.origin.clone()).to_string();
+      let found = occurrence::next_occurrence(state.text(), &needle, run.last.end, run.whole_word)
+        .filter(|found| found.end <= run.origin.start || found.start >= run.origin.end);
+      if let Some(found) = found {
+        state.add_selection(found.clone(), cx);
+        run.last = found;
+      }
+      Some(run)
+    });
   }
 
   fn answer_family(&self, family: DomainFamily, cx: &mut Context<Self>) {
@@ -1339,6 +1639,7 @@ impl DocumentView {
     // nothing lands underneath it, including the permission bar.
     let overlay = self.status_bar_overlays_the_buffer(cx);
     div()
+      .occlude()
       .when(overlay, |bar| bar.absolute().left_0().right_0().bottom_0())
       .flex_shrink_0()
       .flex()
@@ -1382,16 +1683,36 @@ impl DocumentView {
           .on_click(cx.listener(|this, _, window, cx| this.open_language_picker(window, cx))),
       )
   }
-  fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-    match self.mode {
-      Mode::Edit => {
-        let editor = self.ensure_editor(window, cx);
+  /// The editor, with the find bar floating over its top and the status bar over its bottom row.
+  fn render_editor_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    let editor = self.ensure_editor(window, cx);
+    let reserve_status_bar = self.status_bar_overlays_the_buffer(cx);
+    // The status bar floats over the bottom row, so the editor's viewport ends above it; the find
+    // bar keeps revealed matches clear of itself through the editor's reveal margin instead.
+    div()
+      .relative()
+      .flex()
+      .flex_col()
+      .flex_1()
+      .min_h_0()
+      .child(
         div()
           .flex_1()
           .min_h_0()
-          .child(Editor::new(&editor).bordered(false).size_full())
-          .into_any_element()
-      },
+          .when(reserve_status_bar, gpui_kit::Styled::pb_6)
+          .child(Editor::new(&editor).bordered(false).size_full()),
+      )
+      .children(
+        self
+          .find
+          .clone()
+          .map(|find| div().absolute().top_0().left_0().right_0().child(find)),
+      )
+      .into_any_element()
+  }
+  fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    match self.mode {
+      Mode::Edit => self.render_editor_body(window, cx),
       Mode::Preview => {
         let Some(preview) = self.ensure_preview(cx) else {
           return div().flex_1().into_any_element();
@@ -1438,14 +1759,13 @@ impl DocumentView {
         // A div, not gpui's `image_cache` element: that one skips the cache during prepaint,
         // and inline images (`<img>` in a paragraph) lay out in prepaint, so they would fall
         // back to gpui's global loader and treat document-relative paths as URLs.
-        // The find bar takes its own row above the preview, so it never covers
-        // a match near the top.
+        // The find bar floats over the top of the preview, like it does over the editor and PDFs.
         div()
+          .relative()
           .flex()
           .flex_col()
           .flex_1()
           .min_h_0()
-          .children(self.find.clone())
           .child(
             div()
               .flex_1()
@@ -1468,6 +1788,12 @@ impl DocumentView {
                 ),
               ),
           )
+          .children(
+            self
+              .find
+              .clone()
+              .map(|find| div().absolute().top_0().left_0().right_0().child(find)),
+          )
           .into_any_element()
       },
     }
@@ -1478,12 +1804,17 @@ impl DocumentView {
     tip: Option<&'static str>,
     hover: gpui_kit::Hsla,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &Context<Self>,
   ) -> impl IntoElement {
+    let theme = cx.theme();
     div()
       .id(id)
       .px_2()
-      .py_1()
+      .py_0p5()
       .rounded_sm()
+      .border_1()
+      .border_color(theme.border)
+      .bg(theme.background)
       .cursor_pointer()
       .hover(move |style| style.bg(hover))
       .when_some(tip, |button, tip| {
@@ -1509,7 +1840,7 @@ impl DocumentView {
       .border_t_1()
       .border_color(theme.border)
       .bg(theme.muted)
-      .text_sm();
+      .text_xs();
     if self.permission_prompt == PermissionPrompt::ConfirmAlways {
       return Some(
         bar
@@ -1521,6 +1852,7 @@ impl DocumentView {
             None,
             hover,
             cx.listener(|this, _, _, cx| this.set_permission_prompt(PermissionPrompt::Families, cx)),
+            cx,
           ))
           .child(Self::permission_button(
             "allow-always-confirm",
@@ -1528,6 +1860,7 @@ impl DocumentView {
             Some("Turn this off later with allow_remote in settings"),
             hover,
             cx.listener(|this, _, _, cx| this.answer_always(cx)),
+            cx,
           )),
       );
     }
@@ -1547,6 +1880,7 @@ impl DocumentView {
           Some("Keep placeholders and stop asking in this document"),
           hover,
           cx.listener(|this, _, _, cx| this.decline_families(cx)),
+          cx,
         ))
         .child(Self::permission_button(
           "allow-family",
@@ -1554,6 +1888,7 @@ impl DocumentView {
           Some("Saved in settings; also covers its subdomains"),
           hover,
           cx.listener(move |this, _, _, cx| this.answer_family(allow_family.clone(), cx)),
+          cx,
         ))
         .child(Self::permission_button(
           "allow-always",
@@ -1561,6 +1896,7 @@ impl DocumentView {
           Some("Allow remote content in every document"),
           hover,
           cx.listener(|this, _, _, cx| this.set_permission_prompt(PermissionPrompt::ConfirmAlways, cx)),
+          cx,
         )),
     )
   }
@@ -1581,7 +1917,11 @@ impl Render for DocumentView {
     let shows_status_bar = self.shows_status_bar(cx);
     let theme = cx.theme();
     div()
-      .key_context("DocumentView")
+      .key_context(if self.mode == Mode::Preview {
+        "DocumentView MarkdownPreview"
+      } else {
+        "DocumentView"
+      })
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::toggle_mode))
       .on_action(cx.listener(Self::save))
@@ -1591,9 +1931,30 @@ impl Render for DocumentView {
       .on_action(cx.listener(Self::open_code_font_picker))
       .on_action(cx.listener(Self::open_nearby_picker))
       .on_action(cx.listener(Self::open_find))
+      // The editor leaves its own Find and Replace shortcuts to this view, which owns the find bar.
+      .on_action(cx.listener(|this, _: &gpui_kit::component::input::Search, window, cx| {
+        this.open_find(&Find, window, cx);
+      }))
+      .on_action(cx.listener(|this, _: &gpui_kit::component::input::Replace, window, cx| {
+        this.open_replace(window, cx);
+      }))
       .on_action(cx.listener(Self::next_match))
       .on_action(cx.listener(Self::previous_match))
+      .on_action(cx.listener(Self::select_next_occurrence))
+      .on_action(cx.listener(Self::preview_line_up))
+      .on_action(cx.listener(Self::preview_line_down))
+      .on_action(cx.listener(Self::preview_page_up))
+      .on_action(cx.listener(Self::preview_page_down))
+      .on_action(cx.listener(Self::preview_top))
+      .on_action(cx.listener(Self::preview_bottom))
       .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| apply_external_paths(paths, cx)))
+      // Escape backs out of the "Always allow" confirmation before anything else sees it.
+      .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+        if event.keystroke.key == "escape" && this.permission_prompt == PermissionPrompt::ConfirmAlways {
+          this.set_permission_prompt(PermissionPrompt::Families, cx);
+          cx.stop_propagation();
+        }
+      }))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
       .relative()
       .flex()
@@ -1904,6 +2265,29 @@ pub(crate) mod tests {
       let snapshot = view.snapshot(cx).expect("text document has a buffer");
       assert!(snapshot.text.to_string().starts_with("ab"));
       assert!(view.is_dirty());
+    });
+  }
+  #[gpui_kit::test]
+  fn undoing_back_to_the_saved_text_clears_the_dirty_marker(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_dir, _store) = install_globals(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    fs::write(&path, "alpha").unwrap();
+    let loaded = load_text(&path).unwrap();
+
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+
+    cx.simulate_input("ZZ");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.is_dirty()));
+
+    cx.dispatch_action(gpui_kit::component::input::Undo);
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+      assert_eq!(view.snapshot(cx).unwrap().text.to_string(), "alpha");
+      assert!(!view.is_dirty(), "the buffer is back to what is on disk");
     });
   }
   #[gpui_kit::test]
@@ -2501,29 +2885,50 @@ pub(crate) mod tests {
   }
 
   #[gpui_kit::test]
-  fn find_in_the_editor_opens_its_search(cx: &mut TestAppContext) {
+  fn find_in_the_editor_counts_matches_toggles_case_and_replaces(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_dir, _store) = install_globals(cx);
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    fs::write(&path, "name = \"demo\"\n").unwrap();
+    let path = dir.path().join("notes.txt");
+    fs::write(&path, "foo Foo foo").unwrap();
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
 
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_find(&crate::actions::Find, window, cx)));
+    // The editor's own Find shortcut reaches this view's bar; gpui-kit's panel stays hidden.
+    #[cfg(target_os = "macos")]
+    cx.simulate_keystrokes("cmd-f");
+    #[cfg(not(target_os = "macos"))]
+    cx.simulate_keystrokes("ctrl-f");
+    let find = view
+      .read_with(cx, |view, _| view.find.clone())
+      .expect("the find bar opens over the editor");
+    let count = |cx: &mut VisualTestContext| {
+      view.read_with(cx, |view, cx| {
+        let matcher = &view.editor.as_ref().unwrap().read(cx).search_session().matcher;
+        matcher.len()
+      })
+    };
 
-    let active = view.read_with(cx, |view, cx| {
-      view
-        .editor
-        .as_ref()
-        .is_some_and(|editor| editor.read(cx).search_session().is_active())
+    view.update(cx, |view, cx| {
+      view.find_query = "foo".to_owned();
+      view.run_find(cx);
     });
-    assert!(active, "Edit > Find reaches the editor's search");
-    assert!(
-      view.read_with(cx, |view, _| view.find.is_none()),
-      "no preview bar in the editor"
-    );
+    assert_eq!(count(cx), 3, "case is ignored by default");
+
+    find.update(cx, crate::find_bar::FindBar::toggle_case);
+    cx.run_until_parked();
+    assert_eq!(count(cx), 2, "Match Case leaves out Foo");
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.replace_match("bar", false, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(buffer(&view, cx), "bar Foo foo");
+    assert_eq!(count(cx), 1);
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.replace_match("baz", true, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(buffer(&view, cx), "bar Foo baz");
+    assert!(view.read_with(cx, |view, _| view.is_dirty()), "a replacement is an edit");
   }
 
   #[gpui_kit::test]
@@ -2570,6 +2975,87 @@ pub(crate) mod tests {
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "new text");
     assert!(!view.read_with(cx, |view, _| view.is_dirty()));
+  }
+
+  /// Open `text` as a text document with Cmd+D bound the way the app binds it.
+  /// The returned directories must outlive the test.
+  fn open_for_occurrences<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+  ) -> (Entity<DocumentView>, &'a mut VisualTestContext, [tempfile::TempDir; 2]) {
+    cx.update(gpui_kit::init);
+    let (store_dir, _store) = install_globals(cx);
+    cx.update(|cx| {
+      cx.bind_keys([KeyBinding::new(
+        "cmd-d",
+        crate::actions::SelectNextOccurrence,
+        Some("Input && mode == editor"),
+      )]);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    fs::write(&path, text).unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) = cx.add_window_view(|window, cx| DocumentView::open(path, loaded, SessionId::new(), window, cx));
+    (view, cx, [store_dir, dir])
+  }
+
+  fn place_selection(view: &Entity<DocumentView>, range: std::ops::Range<usize>, cx: &mut VisualTestContext) {
+    let editor = view.read_with(cx, |view, _| view.editor.clone().unwrap());
+    cx.update(|_, cx| editor.update(cx, |state, cx| state.set_selected_range(range, cx)));
+  }
+
+  fn buffer(view: &Entity<DocumentView>, cx: &VisualTestContext) -> String {
+    view.read_with(cx, |view, cx| view.buffer_text(cx).unwrap().to_string())
+  }
+
+  #[gpui_kit::test]
+  fn select_next_occurrence_from_a_caret_selects_whole_words_until_every_one_is_selected(cx: &mut TestAppContext) {
+    let (view, cx, _dirs) = open_for_occurrences("foo food foo\nfoo", cx);
+    place_selection(&view, 1..1, cx);
+
+    // The word, the two other whole-word matches, then a wrap back to the
+    // first that adds nothing.
+    for _ in 0..4 {
+      cx.simulate_keystrokes("cmd-d");
+    }
+    cx.simulate_input("bar");
+    cx.run_until_parked();
+
+    assert_eq!(buffer(&view, cx), "bar food bar\nbar");
+  }
+
+  #[gpui_kit::test]
+  fn select_next_occurrence_from_a_selection_matches_inside_words(cx: &mut TestAppContext) {
+    let (view, cx, _dirs) = open_for_occurrences("foo food foo", cx);
+    place_selection(&view, 0..3, cx);
+
+    cx.simulate_keystrokes("cmd-d");
+    cx.simulate_input("x");
+    cx.run_until_parked();
+
+    assert_eq!(buffer(&view, cx), "x xd foo");
+  }
+
+  #[gpui_kit::test]
+  fn select_next_occurrence_starts_over_after_an_edit(cx: &mut TestAppContext) {
+    let (view, cx, _dirs) = open_for_occurrences("ab ab ab", cx);
+    place_selection(&view, 0..2, cx);
+    cx.simulate_keystrokes("cmd-d");
+    // Retyping the same text leaves the buffer as it was but is still an edit.
+    cx.simulate_input("ab");
+    cx.run_until_parked();
+
+    place_selection(&view, 0..2, cx);
+    cx.simulate_keystrokes("cmd-d");
+    cx.simulate_input("Z");
+    cx.run_until_parked();
+
+    assert_eq!(
+      buffer(&view, cx),
+      "Z Z ab",
+      "the new run adds the next match, not the one after the old run"
+    );
   }
 
   #[gpui_kit::test]
@@ -4194,7 +4680,9 @@ pub(crate) mod tests {
       cx.run_until_parked();
       result = load_image(&view, resource.clone(), cx);
     }
-    assert!(matches!(result, Some(Err(_))));
+    // A failed image paints the shared placeholder instead of nothing.
+    assert!(matches!(result, Some(Ok(_))));
+    assert!(has_entry(&view, &resource, cx, |entry| matches!(entry, Entry::Failed)));
     assert!(cache.get(&remote).unwrap().is_none());
     assert_eq!(fetcher.calls().len(), 1);
   }
@@ -4699,6 +5187,36 @@ pub(crate) mod tests {
   }
 
   #[gpui_kit::test]
+  fn a_local_schema_in_a_folder_with_a_space_validates_through_a_relative_ref(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings_dir, _store) = install_globals(cx);
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("My Schemas");
+    fs::create_dir(&folder).unwrap();
+    fs::write(
+      folder.join("schema.json"),
+      r#"{"type":"object","properties":{"retries":{"$ref":"count.json"}}}"#,
+    )
+    .unwrap();
+    fs::write(folder.join("count.json"), r#"{"type":"integer","minimum":0}"#).unwrap();
+    let path = folder.join("doc.json");
+    let text = "{\n  \"$schema\": \"./schema.json\",\n  \"retries\": -1\n}\n";
+    fs::write(&path, text).unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+    settle_schemas(&view, cx);
+    let value = text.find("-1").unwrap();
+    let entries = diagnostic_entries(&view, cx);
+    assert!(
+      entries.iter().any(|(range, severity, _)| {
+        *severity == DiagnosticSeverity::Error && range.start <= value && value < range.end
+      }),
+      "{entries:?}"
+    );
+  }
+
+  #[gpui_kit::test]
   fn an_untitled_relative_schema_never_fetches(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_settings_dir, _store) = install_globals(cx);
@@ -5136,8 +5654,8 @@ pub(crate) mod tests {
     let _ = load_image(&view, resource.clone(), cx);
     cx.run_until_parked();
 
-    assert!(matches!(load_image(&view, resource.clone(), cx), Some(Err(_))));
-    assert!(has_entry(&view, &resource, cx, |entry| matches!(entry, Entry::Failed(_))));
+    assert!(matches!(load_image(&view, resource.clone(), cx), Some(Ok(_))));
+    assert!(has_entry(&view, &resource, cx, |entry| matches!(entry, Entry::Failed)));
   }
   #[cfg(unix)]
   #[gpui_kit::test]

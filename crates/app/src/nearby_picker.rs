@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::{Disableable as _, Icon, IndexPath, Sizable as _};
 use gpui_kit::prelude::*;
@@ -13,7 +14,7 @@ use gpui_kit::{
 use openit_core::browse::{self, Entry, Ranked};
 use openit_core::kind::DocumentKind;
 
-use crate::status_pickers::overlay_frame;
+use crate::status_pickers::{overlay_frame, select_row_in_view};
 use crate::theme::{ActivePalette, hsla};
 use crate::window::replace_document;
 
@@ -46,6 +47,14 @@ pub struct NearbyPicker {
   input: String,
   listing: Listing,
   generation: u64,
+  /// File name of the open document, marked and preselected in its own directory.
+  current_file: Option<String>,
+  /// The query the current listing was built for; differs from `input` while a search is in flight.
+  listed_input: String,
+  preselected: bool,
+  pending_selection: Option<usize>,
+  /// Row of a Return that arrived before its listing did.
+  pending_confirm: Option<usize>,
 }
 
 impl EventEmitter<NearbyPickerEvent> for NearbyPicker {}
@@ -59,13 +68,22 @@ impl NearbyPicker {
     let origin = listing_root(document_path);
     let state = cx.new(|cx| CommandState::new(window, cx));
     state.update(cx, |state, cx| state.focus(window, cx));
+    let current_file = document_path
+      .filter(|path| !path.as_os_str().is_empty())
+      .and_then(Path::file_name)
+      .map(|name| name.to_string_lossy().into_owned());
     let mut picker = Self {
       state,
       prefix_dir: origin.clone(),
       origin,
       input: String::new(),
+      listed_input: String::new(),
       listing: Listing::Pending,
       generation: 0,
+      current_file,
+      preselected: false,
+      pending_selection: None,
+      pending_confirm: None,
     };
     picker.schedule(false, cx);
     picker
@@ -78,6 +96,7 @@ impl NearbyPicker {
 
   fn on_query_change(&mut self, input: &str, cx: &mut Context<Self>) {
     input.clone_into(&mut self.input);
+    self.pending_confirm = None;
     let (dir, _) = browse::parse(&self.input, &self.origin);
     self.prefix_dir = dir;
     self.schedule(true, cx);
@@ -114,11 +133,34 @@ impl NearbyPicker {
       return;
     }
     self.prefix_dir.clone_from(&dir);
+    input.clone_into(&mut self.listed_input);
     self.listing = match outcome {
-      BrowseOutcome::Rows(items) => Listing::Rows { dir, items },
+      BrowseOutcome::Rows(items) => {
+        if !self.preselected && input.is_empty() {
+          self.preselected = true;
+          self.pending_selection = self.current_file.as_deref().and_then(|current| {
+            items
+              .iter()
+              .position(|ranked| !ranked.entry.is_dir && ranked.entry.name == current)
+          });
+        }
+        Listing::Rows { dir, items }
+      },
       BrowseOutcome::Failed(message) => Listing::Failed { message },
     };
     cx.notify();
+  }
+
+  /// Return pressed on `index`. While the listing still belongs to an earlier query (the search
+  /// is debounced and runs off the main thread), the row index would point at the wrong file, so
+  /// the pick waits for the listing that matches the typed query.
+  fn request_confirm(&mut self, index: IndexPath, window: &mut Window, cx: &mut Context<Self>) {
+    if self.listed_input == self.input && matches!(self.listing, Listing::Rows { .. }) {
+      self.confirm(index, window, cx);
+    } else {
+      self.pending_confirm = Some(index.row);
+      cx.notify();
+    }
   }
 
   fn confirm(&self, index: IndexPath, window: &mut Window, cx: &mut Context<Self>) {
@@ -183,19 +225,20 @@ fn browse_outcome(dir: &Path, needle: &str) -> BrowseOutcome {
   }
 }
 
-fn command_items(listing: &Listing) -> Vec<CommandItem> {
+fn command_items(listing: &Listing, current_file: Option<&str>) -> Vec<CommandItem> {
   match listing {
     Listing::Pending => Vec::new(),
-    Listing::Rows { items, .. } => items.iter().map(command_item).collect(),
+    Listing::Rows { items, .. } => items.iter().map(|ranked| command_item(ranked, current_file)).collect(),
     Listing::Failed { message } => vec![CommandItem::new().label(message.clone()).disabled(true)],
   }
 }
 
-fn command_item(ranked: &Ranked) -> CommandItem {
+fn command_item(ranked: &Ranked, current_file: Option<&str>) -> CommandItem {
   let ranked = ranked.clone();
+  let current = !ranked.entry.is_dir && current_file == Some(ranked.entry.name.as_str());
   CommandItem::new().child(move |_, cx| {
     let muted = hsla(cx.global::<ActivePalette>().0.muted_foreground);
-    highlighted_row(&ranked, muted)
+    highlighted_row(&ranked, current, muted)
   })
 }
 
@@ -213,7 +256,7 @@ const fn row_icon(entry: &Entry) -> &'static str {
   }
 }
 
-fn highlighted_row(ranked: &Ranked, muted: Hsla) -> AnyElement {
+fn highlighted_row(ranked: &Ranked, current: bool, muted: Hsla) -> AnyElement {
   let matched: HashSet<u32> = ranked.positions.iter().copied().collect();
   let mut runs: Vec<(String, bool)> = Vec::new();
   for (index, ch) in ranked.entry.name.chars().enumerate() {
@@ -244,16 +287,32 @@ fn highlighted_row(ranked: &Ranked, muted: Hsla) -> AnyElement {
           .map(|(text, hit)| div().when(hit, |el| el.font_weight(FontWeight::BOLD)).child(text)),
       ),
     )
+    .when(current, |row| row.child(div().text_color(muted).child("(current)")))
     .into_any_element()
 }
 
 impl Render for NearbyPicker {
-  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    if let Some(row) = self.pending_selection.take() {
+      let total = match &self.listing {
+        Listing::Rows { items, .. } => items.len(),
+        Listing::Pending | Listing::Failed { .. } => 0,
+      };
+      select_row_in_view(&self.state, row, total, window);
+    }
+    let fresh = self.listed_input == self.input && matches!(self.listing, Listing::Rows { .. });
+    if let Some(row) = self.pending_confirm.filter(|_| fresh) {
+      self.pending_confirm = None;
+      let this = cx.entity();
+      window.defer(cx, move |window, cx| {
+        this.update(cx, |this, cx| this.confirm(IndexPath::new(row), window, cx));
+      });
+    }
     let palette = cx.global::<ActivePalette>().0;
     let this = cx.entity().downgrade();
     let prefix = format_prefix(&self.prefix_dir);
     let muted = hsla(palette.muted_foreground);
-    let items = command_items(&self.listing);
+    let items = command_items(&self.listing, self.current_file.as_deref());
     let on_query = this.clone();
     let on_confirm = this.clone();
     let on_cancel = this;
@@ -271,7 +330,7 @@ impl Render for NearbyPicker {
         let _ = on_query.update(cx, |this, cx| this.on_query_change(&query, cx));
       })
       .on_confirm(move |index, window, cx| {
-        let _ = on_confirm.update(cx, |this, cx| this.confirm(index, window, cx));
+        let _ = on_confirm.update(cx, |this, cx| this.request_confirm(index, window, cx));
       })
       .on_cancel(move |_, cx| {
         let _ = on_cancel.update(cx, |_, cx| Self::close(cx));
@@ -283,6 +342,7 @@ impl Render for NearbyPicker {
       cx.listener(|_, _, _, cx| Self::close(cx)),
       move |panel| panel.child(command),
     )
+    .capture_action(cx.listener(|_, _: &Cancel, _, cx| Self::close(cx)))
   }
 }
 

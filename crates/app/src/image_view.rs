@@ -88,6 +88,9 @@ const SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 const SAVED_NOTICE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Checkerboard cell size in window pixels.
 const CHECKER_CELL: f32 = 8.0;
+/// Lightness gap between the two checkerboard greys; small enough to stay
+/// theme-derived, large enough that transparency reads at a glance.
+const CHECKER_CONTRAST: f32 = 0.2;
 
 /// What fills the space around and behind the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -161,6 +164,8 @@ pub struct ImageView {
   saving: bool,
   closing: bool,
   close_decided: bool,
+  /// Reopened from a recovered draft rather than created in this session.
+  restored: bool,
   quitting: bool,
   last_error: Option<String>,
   checkpoint_task: Option<Task<()>>,
@@ -196,6 +201,8 @@ pub struct ImageView {
   #[allow(dead_code, reason = "the subscription keeps the appearance observer alive")]
   appearance_observation: Option<gpui_kit::Subscription>,
   release: Option<gpui_kit::Subscription>,
+  #[allow(dead_code, reason = "the subscription keeps the activation observer alive")]
+  activation_observation: Option<gpui_kit::Subscription>,
 }
 
 impl ImageView {
@@ -241,6 +248,15 @@ impl ImageView {
     if !self.background_chosen && (decoded.has_alpha || self.format == ImageFormat::Svg) {
       self.background = ImageBackground::Checkerboard;
     }
+    if self.format != ImageFormat::Svg {
+      let texture = decoded.render.size(0);
+      let texture = (
+        u32::try_from(texture.width.0).unwrap_or(0),
+        u32::try_from(texture.height.0).unwrap_or(0),
+      );
+      (self.width, self.height) = oriented_size((self.width, self.height), texture);
+    }
+    self.publish_background(cx.active_window() == Some(self.window_handle), cx);
     self.frame_index = 0;
     self.decode_error = None;
     self.drop_gpu(cx);
@@ -277,6 +293,7 @@ impl ImageView {
       cx,
     );
     view.start_decode(cx);
+    view.restored = true;
     if view.path.as_os_str().is_empty() {
       view.untitled = true;
     } else {
@@ -370,10 +387,16 @@ impl ImageView {
       focus: cx.focus_handle(),
       appearance_observation: Some(crate::theme::observe_appearance(window)),
       release: None,
+      activation_observation: None,
+      restored: false,
     };
     window.focus(&view.focus, cx);
     Self::install_close_guard(window, cx);
     view.release = Some(cx.on_release(Self::drop_gpu));
+    view.activation_observation = Some(cx.observe_window_activation(window, |view, window, cx| {
+      view.publish_background(window.is_window_active(), cx);
+    }));
+    view.publish_background(window.is_window_active(), cx);
     view
   }
 
@@ -384,6 +407,16 @@ impl ImageView {
       .file_name()
       .map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned())
   }
+
+  /// What the Discard button of the close prompt does, in words.
+  const fn discard_detail(&self) -> &'static str {
+    if self.restored {
+      "Discard removes the recovered draft as well."
+    } else {
+      "Your changes will be lost if you don't save them."
+    }
+  }
+
   pub(crate) fn path(&self) -> &Path {
     &self.path
   }
@@ -405,7 +438,7 @@ impl ImageView {
     let answer = window.prompt(
       gpui_kit::PromptLevel::Warning,
       &format!("Save changes to {}?", self.title()),
-      Some("Discard removes the recovered draft as well."),
+      Some(self.discard_detail()),
       &["Save", "Discard", "Cancel"],
       cx,
     );
@@ -552,7 +585,15 @@ impl ImageView {
   pub fn set_background(&mut self, background: ImageBackground, cx: &mut Context<Self>) {
     self.background = background;
     self.background_chosen = true;
+    self.publish_background(cx.active_window() == Some(self.window_handle), cx);
     cx.notify();
+  }
+
+  /// Tell the menu bar what this window shows, when it is the frontmost one.
+  fn publish_background(&self, active: bool, cx: &mut App) {
+    if active {
+      crate::menus::set_active_image_background(self.background, cx);
+    }
   }
 
   fn base_dir(&self) -> Option<PathBuf> {
@@ -859,7 +900,9 @@ impl ImageView {
       .unwrap_or_else(|| PathBuf::from("."));
     let prompt = cx.prompt_for_new_path(&directory, Some("Untitled.png"));
     cx.spawn_in(window, async move |view, cx| {
-      let chosen = match prompt.await {
+      let answer = prompt.await;
+      let _ = view.update_in(cx, |view, window, cx| view.refocus(window, cx));
+      let chosen = match answer {
         Ok(Ok(Some(path))) => path,
         Ok(Ok(None)) => return false,
         Ok(Err(error)) => {
@@ -901,20 +944,30 @@ impl ImageView {
       .file_stem()
       .map_or_else(|| "Untitled".to_owned(), |stem| stem.to_string_lossy().into_owned());
     let dialog = cx.new(|cx| ExportDialog::new((width, height), has_alpha, &stem, window, cx));
-    cx.subscribe_in(&dialog, window, |view, dialog, event: &ExportEvent, window, cx| {
-      match event {
-        ExportEvent::Confirm(options) => {
-          let suggested = dialog.read(cx).suggested_name();
-          view.export_dialog = None;
-          view.run_export(options.clone(), suggested.as_str(), window, cx);
-        },
-        ExportEvent::Close => view.export_dialog = None,
-      }
-      cx.notify();
+    cx.subscribe_in(&dialog, window, |view, dialog, event: &ExportEvent, window, cx| match event {
+      ExportEvent::Confirm(options) => {
+        let suggested = dialog.read(cx).suggested_name();
+        view.close_export(window, cx);
+        view.run_export(options.clone(), suggested.as_str(), window, cx);
+      },
+      ExportEvent::Close => view.close_export(window, cx),
     })
     .detach();
     self.export_dialog = Some(dialog);
     cx.notify();
+  }
+
+  /// Drop the export dialog and hand the keyboard back to the image, so the
+  /// shortcuts work again whichever control had focus.
+  fn close_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.export_dialog = None;
+    self.refocus(window, cx);
+    cx.notify();
+  }
+
+  /// Put keyboard focus back on the image surface.
+  fn refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    window.focus(&self.focus, cx);
   }
 
   /// Ask where to write, then encode off the UI thread.
@@ -937,9 +990,14 @@ impl ImageView {
     let transform = self.transform;
     let base_dir = self.base_dir();
     self.prompt_task = Some(cx.spawn_in(window, async move |view, cx| {
-      let Ok(Ok(Some(target))) = prompt.await else {
+      let answer = prompt.await;
+      let _ = view.update_in(cx, |view, window, cx| view.refocus(window, cx));
+      let Ok(Ok(Some(target))) = answer else {
         return;
       };
+      let name = target
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
       let result = cx
         .background_spawn(async move { encode_export(&bytes, format, transform, base_dir.as_deref(), &options) })
         .await
@@ -949,13 +1007,16 @@ impl ImageView {
             .map_err(|error| error.to_string())
         });
       let _ = view.update(cx, |view, cx| {
-        view.last_error = match result {
-          Ok(()) => None,
+        match result {
+          Ok(()) => {
+            view.last_error = None;
+            view.announce(format!("Exported {name}"), cx);
+          },
           Err(error) => {
             tracing::error!(%error, "export failed");
-            Some(format!("Export failed: {error}"))
+            view.last_error = Some(format!("Export failed: {error}"));
           },
-        };
+        }
         cx.notify();
       });
     }));
@@ -1055,7 +1116,7 @@ impl ImageView {
     let answer = window.prompt(
       gpui_kit::PromptLevel::Warning,
       &format!("Save changes to {}?", self.title()),
-      Some("Discard removes the recovered draft as well."),
+      Some(self.discard_detail()),
       &["Save", "Discard", "Cancel"],
       cx,
     );
@@ -1204,9 +1265,15 @@ impl ImageView {
     Self::on_disk_change(self, cx);
   }
 
-  /// Pixel size of the decoded texture, in image pixels.
+  /// Size of the image in window pixels at 100%: the decoded texture for a
+  /// raster, the document's nominal size for an SVG, whose texture is
+  /// rasterized denser than the window shows it.
   fn texture_size(&self) -> Option<Size<Pixels>> {
     let decoded = self.decoded.as_ref()?;
+    if self.format == ImageFormat::Svg && self.width > 0 && self.height > 0 {
+      let (width, height) = self.transform.apply_to_size(self.width, self.height);
+      return Some(size(px(pixels_from_u32(width)), px(pixels_from_u32(height))));
+    }
     let size = decoded
       .render
       .size(self.frame_index.min(decoded.render.frame_count().saturating_sub(1)));
@@ -1420,8 +1487,9 @@ impl ImageView {
   /// The two greys of the transparency checkerboard, derived from the theme.
   fn checker_colors(cx: &App) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
     let base = cx.theme().background;
-    let light = gpui_kit::hsla(base.h, base.s * 0.2, (base.l + 0.06).clamp(0., 1.), 1.);
-    let dark = gpui_kit::hsla(base.h, base.s * 0.2, (base.l - 0.06).clamp(0., 1.), 1.);
+    let (high, low) = checker_lightness(base.l);
+    let light = gpui_kit::hsla(base.h, base.s * 0.2, high, 1.);
+    let dark = gpui_kit::hsla(base.h, base.s * 0.2, low, 1.);
     (light, dark)
   }
 
@@ -1453,7 +1521,12 @@ impl ImageView {
     }
     // The theme picker lives in View > Color Theme... and Cmd+K Cmd+T.
     let actions = actions.child(toolbar_button(
-      "image-background",
+      match self.background {
+        ImageBackground::Theme => "image-background-theme",
+        ImageBackground::White => "image-background-white",
+        ImageBackground::Black => "image-background-black",
+        ImageBackground::Checkerboard => "image-background-checkerboard",
+      },
       Icon::empty().path("icons/swatch-book.svg"),
       format!(
         "Background: {} (click for {})",
@@ -1525,6 +1598,7 @@ impl ImageView {
     let viewport = Rc::clone(&self.viewport);
     let plan = PlanSource {
       decoded: self.decoded.clone(),
+      base: self.texture_size(),
       zoom: self.zoom,
       pan: self.pan,
       frame: self.frame_index,
@@ -1669,6 +1743,9 @@ fn refresh(handle: gpui_kit::AnyWindowHandle, cx: &mut gpui_kit::AsyncApp) {
 /// The view state one painted frame reads, captured before layout.
 struct PlanSource {
   decoded: Option<DocumentImage>,
+  /// The image's size at 100% (`ImageView::texture_size`): an SVG's nominal
+  /// size, not the denser texture it was rasterized at.
+  base: Option<Size<Pixels>>,
   zoom: Zoom,
   pan: Point<Pixels>,
   frame: usize,
@@ -1679,14 +1756,14 @@ impl PlanSource {
   fn paint_plan(&self, viewport: Bounds<Pixels>) -> Option<PaintPlan> {
     let decoded = self.decoded.as_ref()?;
     let frame = self.frame.min(decoded.render.frame_count().saturating_sub(1));
-    let texture = size_in_pixels(decoded.render.size(frame));
+    let base = self.base?;
     let scale = match self.zoom {
       Zoom::Scale(scale) => scale,
-      Zoom::Fit => (viewport.size.width / texture.width)
-        .min(viewport.size.height / texture.height)
+      Zoom::Fit => (viewport.size.width / base.width)
+        .min(viewport.size.height / base.height)
         .clamp(MIN_SCALE, 1.0),
     };
-    let drawn = size(texture.width * scale, texture.height * scale);
+    let drawn = size(base.width * scale, base.height * scale);
     Some(PaintPlan {
       image: placed(viewport, drawn, clamp_pan(self.pan, viewport.size, drawn)),
       render: std::sync::Arc::clone(&decoded.render),
@@ -1733,6 +1810,31 @@ fn size_in_pixels(size: Size<DevicePixels>) -> Size<Pixels> {
 /// One device pixel count as an exact `f32`.
 fn pixels_of(value: DevicePixels) -> f32 {
   f32::from(i16::try_from(value.0).unwrap_or(i16::MAX))
+}
+
+/// A pixel count as an exact `f32`; image edges stay far below `u16::MAX`.
+fn pixels_from_u32(value: u32) -> f32 {
+  f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+}
+
+/// The header size turned to match the orientation the decoder produced, so
+/// a JPEG with an EXIF rotation reports the size it is shown at.
+const fn oriented_size(header: (u32, u32), texture: (u32, u32)) -> (u32, u32) {
+  let header_landscape = header.0 > header.1;
+  let texture_landscape = texture.0 > texture.1;
+  if header.0 != header.1 && texture.0 != texture.1 && header_landscape != texture_landscape {
+    (header.1, header.0)
+  } else {
+    header
+  }
+}
+
+/// Lightness of the two checkerboard cells for a theme background of
+/// lightness `base`: `CHECKER_CONTRAST` apart, centered on the background
+/// and shifted inward where the theme is nearly white or black.
+fn checker_lightness(base: f32) -> (f32, f32) {
+  let high = (base + CHECKER_CONTRAST / 2.).clamp(CHECKER_CONTRAST, 1.);
+  (high, high - CHECKER_CONTRAST)
 }
 
 /// A scale as a whole percentage.
@@ -1793,6 +1895,12 @@ impl Render for ImageView {
       .on_action(cx.listener(Self::open_export))
       .on_action(cx.listener(Self::undo))
       .on_action(cx.listener(Self::redo))
+      .on_key_down(cx.listener(|view, event: &gpui_kit::KeyDownEvent, window, cx| {
+        if view.export_dialog.is_some() && event.keystroke.key == "escape" {
+          view.close_export(window, cx);
+          cx.stop_propagation();
+        }
+      }))
       .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| apply_external_paths(paths, cx)))
       .drag_over::<ExternalPaths>(|style, _, _, cx| external_paths_ring(style, cx))
       .relative()
@@ -1819,7 +1927,10 @@ mod tests {
   use openit_core::document::{LoadedImage, load_image};
   use openit_core::session::SessionId;
 
-  use super::{ImageBackground, ImageView, SAVE_DELAY, format_size};
+  use super::{
+    CHECKER_CONTRAST, ImageBackground, ImageView, PlanSource, SAVE_DELAY, Zoom, checker_lightness, format_size,
+    oriented_size,
+  };
   use crate::actions::{ActualSize, CycleBackground, RotateRight, ZoomIn, ZoomToFit};
   use crate::document_view::tests::install_globals;
   use crate::session::CHECKPOINT_DELAY;
@@ -1830,6 +1941,28 @@ mod tests {
       .save(&path)
       .unwrap();
     path
+  }
+
+  #[test]
+  fn an_svg_rasterized_denser_than_the_screen_paints_at_its_nominal_size() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="5"><rect width="10" height="5"/></svg>"#;
+    let decoded = crate::svg::decode_document_at(svg, openit_core::raster::Transform::IDENTITY, None, 2.0).unwrap();
+    let plan = PlanSource {
+      decoded: Some(decoded),
+      base: Some(gpui_kit::size(px(10.), px(5.))),
+      zoom: Zoom::Scale(1.0),
+      pan: Point::default(),
+      frame: 0,
+    };
+    let viewport = gpui_kit::Bounds::new(Point::default(), gpui_kit::size(px(100.), px(100.)));
+
+    let painted = plan.paint_plan(viewport).unwrap().image.size;
+
+    assert_eq!(
+      painted,
+      gpui_kit::size(px(10.), px(5.)),
+      "100% is the nominal size, not the 2x texture"
+    );
   }
 
   fn open(
@@ -1983,6 +2116,27 @@ mod tests {
     assert_eq!(format_size(512), "512 B");
     assert_eq!(format_size(2048), "2.0 KB");
     assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+  }
+
+  #[test]
+  fn an_exif_rotated_header_reports_the_oriented_size() {
+    assert_eq!(oriented_size((2, 1), (1, 2)), (1, 2), "the decoder turned it upright");
+    assert_eq!(oriented_size((2, 1), (2, 1)), (2, 1));
+    assert_eq!(oriented_size((3, 3), (3, 3)), (3, 3));
+    assert_eq!(
+      oriented_size((4000, 3000), (4096, 3072)),
+      (4000, 3000),
+      "a capped texture keeps its header"
+    );
+  }
+
+  #[test]
+  fn the_checkerboard_keeps_its_contrast_on_near_white_and_near_black_themes() {
+    for base in [0.0_f32, 0.12, 0.5, 0.97, 1.0] {
+      let (high, low) = checker_lightness(base);
+      assert!((high - low - CHECKER_CONTRAST).abs() < 1e-6, "gap at {base}");
+      assert!((0.0..=1.0).contains(&high) && (0.0..=1.0).contains(&low), "range at {base}");
+    }
   }
 
   #[gpui_kit::test]

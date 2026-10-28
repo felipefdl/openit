@@ -13,6 +13,7 @@ pub mod error;
 pub mod handoff;
 pub mod ipc;
 pub mod kind;
+pub mod occurrence;
 pub mod pdf;
 pub mod pdf_markdown;
 pub mod pdf_text;

@@ -65,7 +65,7 @@ fn is_json_completion_trigger(new_text: &str) -> bool {
 }
 
 const fn is_json_completion_char(ch: char) -> bool {
-  matches!(ch, '"' | '{' | ',' | ':' | '[' | '_' | '$') || ch.is_ascii_alphanumeric()
+  matches!(ch, '"' | ':' | '_' | '$') || ch.is_ascii_alphanumeric()
 }
 
 fn rope_prefix(rope: &Rope, offset: usize) -> String {
@@ -128,19 +128,19 @@ mod tests {
     let offset = text.find("{\n  ").unwrap() + "{\n  ".len();
     let items = completions(JsonFamily::Json, text, offset, Some(&documents(schema)));
     assert_eq!(items[0].kind, CompletionKind::Property);
-    assert_eq!(items[0].insert, "\"name\"");
+    assert_eq!(items[0].insert, "\"name\": ");
     assert!(!items[0].insert.contains('$'));
   }
 
   #[test]
   fn completion_trigger_is_gated_on_json_structure_and_identifier_chars() {
     assert!(is_json_completion_trigger("\""));
-    assert!(is_json_completion_trigger("{"));
-    assert!(is_json_completion_trigger(","));
     assert!(is_json_completion_trigger(":"));
-    assert!(is_json_completion_trigger("["));
     assert!(is_json_completion_trigger("n"));
     assert!(is_json_completion_trigger("_"));
+    assert!(!is_json_completion_trigger("{"));
+    assert!(!is_json_completion_trigger(","));
+    assert!(!is_json_completion_trigger("["));
     assert!(!is_json_completion_trigger(""));
     assert!(!is_json_completion_trigger(" "));
     assert!(!is_json_completion_trigger("\n"));

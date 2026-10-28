@@ -608,22 +608,22 @@ pub(crate) mod dialog {
             .child(
               div()
                 .id("updates-detail")
-                .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .text_xs()
                 .text_color(muted)
                 .child(detail),
+            )
+            // Right under the text it belongs to; spare height falls above the buttons.
+            .child(
+              div().flex_shrink_0().child(
+                Checkbox::new("auto-check-updates")
+                  .small()
+                  .label("Automatically check for updates")
+                  .checked(auto_check)
+                  .on_click(cx.listener(|this, value: &bool, _, cx| this.set_auto_check(*value, cx))),
+              ),
             ),
-        )
-        .child(
-          div().flex_shrink_0().child(
-            Checkbox::new("auto-check-updates")
-              .small()
-              .label("Automatically check for updates")
-              .checked(auto_check)
-              .on_click(cx.listener(|this, value: &bool, _, cx| this.set_auto_check(*value, cx))),
-          ),
         )
         .child(self.footer(can_install, cx));
       let view = cx.entity().downgrade();

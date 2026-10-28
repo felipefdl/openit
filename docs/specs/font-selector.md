@@ -66,8 +66,8 @@ Stop and report: font size, ligatures, loading a font file, per-window fonts, PD
 ### 3. Font picker overlay
 
 - After: 2
-- One `Command` overlay, two openers. Both lists are `all_font_names()`. UI Enter writes `font.ui` only. Code Enter writes `font.code` only.
-- Moving the highlight applies the matching `Theme` field (debounced). Enter commits. Escape restores the saved pair and closes.
+- One `Command` overlay, two openers. Both lists are `all_font_names()`. The current font is preselected and scrolled into view on open. UI Enter writes `font.ui` only. Code Enter writes `font.code` only.
+- Moving the highlight applies the matching `Theme` field (debounced). Enter commits. Escape restores the saved pair and closes, even with a query typed.
 - Done when:
   - UI Font opener: list is `all_font_names()`; Enter writes `font.ui` only
   - Code Font opener: same names; Enter writes `font.code` only

@@ -258,8 +258,7 @@ pub(crate) fn open_window(cx: &mut gpui_kit::App) {
 mod dialog {
   use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
   use gpui_kit::component::checkbox::Checkbox;
-  use gpui_kit::component::input::Escape;
-  use gpui_kit::component::{ActiveTheme, Disableable, Sizable};
+  use gpui_kit::component::{ActiveTheme, Disableable, Sizable, TitleBar};
   use gpui_kit::prelude::*;
   use gpui_kit::{
     App, Bounds, Context, FocusHandle, IntoElement, Render, SharedString, TitlebarOptions, Window, WindowBounds,
@@ -277,13 +276,12 @@ mod dialog {
     let options = WindowOptions {
       titlebar: Some(TitlebarOptions {
         title: Some("Install Command Line Tools".into()),
-        appears_transparent: false,
-        traffic_light_position: None,
+        ..TitleBar::title_bar_options()
       }),
-      window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(420.), px(260.)), cx))),
-      window_min_size: Some(size(px(420.), px(260.))),
+      window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(420.), px(340.)), cx))),
+      window_min_size: Some(size(px(420.), px(340.))),
       is_resizable: false,
-      ..WindowOptions::default()
+      ..TitleBar::window_options()
     };
     if let Err(error) = cx.open_window(options, |window, cx| cx.new(|cx| InstallView::new(window, cx))) {
       tracing::error!(%error, "install window open failed");
@@ -294,6 +292,8 @@ mod dialog {
     focus: FocusHandle,
     installed: LinkStatus,
     wanted: LinkStatus,
+    /// What the links will point to, shown before Apply.
+    target: Option<String>,
     status: String,
     applying: bool,
   }
@@ -307,6 +307,7 @@ mod dialog {
         focus,
         installed,
         wanted: initial_wanted(installed),
+        target: link_target().ok().map(|target| target.display().to_string()),
         status: String::new(),
         applying: false,
       }
@@ -318,11 +319,6 @@ mod dialog {
 
     #[expect(clippy::unused_self, reason = "CloseWindow listener signature")]
     fn close(&mut self, _: &CloseWindow, window: &mut Window, _: &mut Context<Self>) {
-      window.remove_window();
-    }
-
-    #[expect(clippy::unused_self, reason = "Escape listener signature")]
-    fn escape(&mut self, _: &Escape, window: &mut Window, _: &mut Context<Self>) {
       window.remove_window();
     }
 
@@ -362,7 +358,9 @@ mod dialog {
           self.wanted = self.installed;
           SUCCESS.clone_into(&mut self.status);
         },
-        Err(error) if error.is_cancelled() => {},
+        Err(error) if error.is_cancelled() => {
+          "Administrator access was not granted. Nothing was changed.".clone_into(&mut self.status);
+        },
         Err(error) => self.status = error.to_string(),
       }
       cx.notify();
@@ -435,7 +433,35 @@ mod dialog {
       let palette = cx.global::<ActivePalette>().0;
       let muted = cx.theme().muted_foreground;
       let mono = cx.theme().mono_font_family.clone();
+      let description = format!(
+        "Adds command links in {} that open files in OpenIt from a terminal{}. macOS asks for an administrator password to write there.",
+        unix_install_dir().display(),
+        self
+          .target
+          .as_ref()
+          .map_or_else(String::new, |target| format!(", pointing to {target}")),
+      );
       let children = vec![
+        TitleBar::new()
+          .border_0()
+          .child(
+            div()
+              .flex()
+              .items_center()
+              .w_full()
+              .h_full()
+              .text_sm()
+              .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+              .child("Install Command Line Tools"),
+          )
+          .into_any_element(),
+        div()
+          .px_3()
+          .pt_3()
+          .text_xs()
+          .text_color(muted)
+          .child(description)
+          .into_any_element(),
         div()
           .flex()
           .flex_col()
@@ -491,7 +517,11 @@ mod dialog {
       .key_context("Dialog")
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::close))
-      .on_action(cx.listener(Self::escape))
+      .on_key_down(|event, window, _| {
+        if event.keystroke.key == "escape" {
+          window.remove_window();
+        }
+      })
     }
   }
 }

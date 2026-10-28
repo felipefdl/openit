@@ -293,10 +293,11 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
       default_for(wanted)
     }
   };
-  let Some((kind, palette, config)) = ThemeCatalog::get(cx).visual(resolved) else {
-    tracing::warn!(%id, ?wanted, "could not resolve theme");
-    return;
-  };
+  let catalog_visual = ThemeCatalog::get(cx).visual(resolved);
+  let (kind, palette, config) = catalog_visual.unwrap_or_else(|| {
+    tracing::warn!(%id, ?wanted, "could not resolve theme; using the built-in palette");
+    built_in_visual(wanted)
+  });
   Theme::global_mut(cx).apply_config(&config);
   apply_font_families(cx);
   let refresh_all = window.is_none();
@@ -313,6 +314,31 @@ pub fn apply_theme(id: &str, wanted: ThemeKind, window: Option<&mut Window>, cx:
   if refresh_all {
     refresh_windows(cx);
   }
+}
+
+/// The palette and gpui-component config used when no catalog theme resolves, so every view
+/// still finds an [`ActivePalette`]. Roles come from the same defaults a bare theme gets.
+fn built_in_visual(kind: ThemeKind) -> (ThemeKind, UiPalette, Rc<ThemeConfig>) {
+  let spec = ThemeSpec {
+    id: "built-in".to_owned(),
+    name: "Built-in".to_owned(),
+    kind,
+    style: ThemeStyle::default(),
+  };
+  let palette = UiPalette::from_style(&spec.style, kind, &ThemeStyle::default());
+  let config = Rc::new(theme_config(&spec, &palette, &spec.style));
+  (kind, palette, config)
+}
+
+/// The border of a floating picker or dialog. Dark themes author borders barely lighter than
+/// their surfaces, so the edge is pulled toward the foreground to stay visible.
+pub fn overlay_border(palette: &UiPalette) -> Hsla {
+  let border = if palette.kind.is_dark() {
+    palette.border.mix(palette.foreground, 0.3)
+  } else {
+    palette.border
+  };
+  hsla(border)
 }
 
 fn apply_font_families(cx: &mut App) {
@@ -576,6 +602,29 @@ mod tests {
       assert!(Theme::global(cx).mode.is_dark());
       let expected = ThemeCatalog::get(cx).palette("warm-burnout-dark").expect("bundled default");
       assert_eq!(cx.global::<ActivePalette>().0, expected);
+    });
+  }
+
+  #[gpui_kit::test]
+  fn apply_theme_without_any_theme_installs_a_built_in_palette(cx: &TestAppContext) {
+    init_theme(cx);
+    cx.update(|cx| {
+      cx.set_global(ThemeCatalog {
+        entries: Vec::new(),
+        sources: HashMap::new(),
+        parsed: RefCell::new(HashMap::new()),
+        palettes: RefCell::new(HashMap::new()),
+        configs: RefCell::new(HashMap::new()),
+        dark_base: ThemeStyle::default(),
+        light_base: ThemeStyle::default(),
+        builds: 1,
+      });
+      apply_theme("nope", ThemeKind::Dark, None, cx);
+      assert!(Theme::global(cx).mode.is_dark());
+      assert_eq!(cx.global::<ActivePalette>().0.kind, ThemeKind::Dark);
+      apply_theme("nope", ThemeKind::Light, None, cx);
+      assert!(!Theme::global(cx).mode.is_dark());
+      assert_eq!(cx.global::<ActivePalette>().0.kind, ThemeKind::Light);
     });
   }
 

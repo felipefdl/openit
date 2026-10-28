@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::base::actions::{SelectDown, SelectUp};
+use gpui_kit::base::actions::{Cancel, SelectDown, SelectUp};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::theme::Theme;
@@ -13,7 +13,8 @@ use gpui_kit::{
 };
 
 use crate::settings::SettingsStore;
-use crate::theme::{ActivePalette, hsla};
+use crate::status_pickers::select_row_in_view;
+use crate::theme::{ActivePalette, hsla, overlay_border};
 
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(80);
 
@@ -214,13 +215,9 @@ impl Render for FontPicker {
     if self.needs_initial_selection {
       self.needs_initial_selection = false;
       let current = current_name(self.slot, cx);
-      if let Some(row) = self.filtered().iter().position(|name| *name == current.as_ref()) {
-        let state = self.state.clone();
-        window.on_next_frame(move |window, cx| {
-          state.update(cx, |state, cx| {
-            state.set_selected_index(Some(IndexPath::new(row)), window, cx);
-          });
-        });
+      let names = self.filtered();
+      if let Some(row) = names.iter().position(|name| *name == current.as_ref()) {
+        select_row_in_view(&self.state, row, names.len(), window);
       }
     }
     let palette = cx.global::<ActivePalette>().0;
@@ -269,12 +266,13 @@ impl Render for FontPicker {
           .overflow_hidden()
           .bg(hsla(palette.sidebar))
           .border_1()
-          .border_color(hsla(palette.border))
+          .border_color(overlay_border(&palette))
           .rounded_lg()
           .shadow_lg()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .capture_action(cx.listener(|this, _: &SelectUp, _, cx| this.schedule_preview(cx)))
           .capture_action(cx.listener(|this, _: &SelectDown, _, cx| this.schedule_preview(cx)))
+          .capture_action(cx.listener(|this, _: &Cancel, window, cx| this.close(window, cx)))
           .child(command),
       )
   }

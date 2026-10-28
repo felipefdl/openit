@@ -75,9 +75,9 @@ Stop and report: a second entry point, listing more than one directory level, sh
 
 ### 4. The picker
 
-- A palette on gpui-kit `Command`, without content search, recents, or the `:line` suffix. It opens rooted at the document's directory; an untitled or empty window roots at the home directory. The input shows the current root as a muted prefix.
-- Enter on a file row calls item 3 and closes the picker. Enter on a directory row rewrites the input to `<name>/`, which moves the root and clears the needle. Typing `../`, `sub/`, `~/`, or an absolute path moves the root the same way. Escape closes.
-- Listing and ranking run off the UI thread after a 100 ms debounce. Every result carries the query it was computed for; a result for a stale query is dropped.
+- A palette on gpui-kit `Command`, without content search, recents, or the `:line` suffix. It opens rooted at the document's directory; an untitled or empty window roots at the home directory. The input shows the current root as a muted prefix. The current file is preselected, scrolled into view, and marked "(current)".
+- Enter on a file row calls item 3 and closes the picker. Enter on a directory row rewrites the input to `<name>/`, which moves the root and clears the needle. Typing `../`, `sub/`, `~/`, or an absolute path moves the root the same way. Escape closes immediately, even with a query typed.
+- Listing and ranking run off the UI thread after a 100 ms debounce. Every result carries the query it was computed for; a result for a stale query is dropped. Enter while the listing belongs to an earlier query waits for the matching listing before confirming; another edit cancels that pending confirmation.
 - The unreadable-directory error is one row in the list naming the directory and the cause; the input stays editable so `../` recovers.
 - After: 2, 3
 - Done when (integration harness):

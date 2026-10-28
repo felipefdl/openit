@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use crate::drop::{apply_external_paths, external_paths_ring};
 use gpui_kit::base::{Scrollbar, ScrollbarHandle};
-use gpui_kit::component::{ActiveTheme as _, Icon, TitleBar};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, TitleBar};
 use gpui_kit::prelude::{FluentBuilder as _, InteractiveElement as _, StatefulInteractiveElement as _};
 use gpui_kit::{
   AnyElement, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds, ContentMask, Context, Corners,
@@ -433,7 +434,8 @@ impl PdfView {
           view.submit_password(password.clone(), window, cx);
         },
         PasswordPromptEvent::Cancel => {
-          view.load = Load::Failed("This PDF is password protected".to_owned());
+          // Keep the document locked: the window offers to ask again.
+          view.load = Load::Locked { wrong: false };
           view.close_prompt(window, cx);
         },
       },
@@ -837,30 +839,33 @@ impl PdfView {
     let Some(document) = self.markdown.as_ref() else {
       return (
         Icon::empty().path("icons/notebook-pen.svg"),
-        "Generate Markdown",
+        "Convert to Markdown",
         Some("secondary-shift-m"),
       );
     };
+    // Like the Markdown window's own toggle: the icon is where a click goes.
     if self.shows_markdown() && document.read(cx).is_editing() {
       (
         Icon::new(gpui_kit::component::IconName::Eye),
-        "Markdown preview",
+        "Preview",
         Some("secondary-shift-e"),
       )
     } else if self.shows_markdown() {
+      (Icon::empty().path("icons/pencil.svg"), "Edit", Some("secondary-shift-e"))
+    } else {
       (
         Icon::empty().path("icons/book-open-text.svg"),
-        "Edit the Markdown",
-        Some("secondary-shift-e"),
+        "Show the Markdown",
+        Some("secondary-shift-m"),
       )
-    } else {
-      (Icon::new(gpui_kit::component::IconName::Eye), "Show the Markdown", None)
     }
   }
 
   /// Show the pages again.
   fn show_pdf(&mut self, _: &PdfPages, window: &mut Window, cx: &mut Context<Self>) {
     self.view = View::Pdf;
+    // The save notice described the Markdown, not these pages.
+    self.notice = None;
     window.focus(&self.focus, cx);
     cx.notify();
   }
@@ -991,6 +996,11 @@ impl PdfView {
           FindBarEvent::QueryChanged(query) => view.run_search(query.clone(), window, cx),
           FindBarEvent::Pick(index) => view.set_current_match(Some(*index), cx),
           FindBarEvent::Close => view.close_find(window, cx),
+          // Case and replace are the editor's; a PDF bar never shows them.
+          FindBarEvent::CaseToggled
+          | FindBarEvent::ReplaceToggled
+          | FindBarEvent::Replace(_)
+          | FindBarEvent::ReplaceAll(_) => {},
         }),
       );
     self.find = Some(bar);
@@ -1101,8 +1111,13 @@ impl PdfView {
     let top = bounds.origin.y + px(shown.y * self.scale());
     // The find bar covers the top of the pages, so a match lands lower while
     // it is open.
-    let fraction = if self.find.is_some() { 0.6 } else { 1. / 3. };
-    self.set_scroll(top - viewport.size.height * fraction, cx);
+    let top_margin = if self.find.is_some() {
+      // Clear of the whole bar and its results list, plus a line of air.
+      px(crate::find_bar::panel_height(self.matches.len()) + 24.).min(viewport.size.height * 0.8)
+    } else {
+      viewport.size.height / 3.
+    };
+    self.set_scroll(top - top_margin, cx);
   }
 
   fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1408,7 +1423,7 @@ impl PdfView {
         actions.child(toolbar_button(
           "pdf-pages",
           Icon::empty().path("icons/presentation.svg"),
-          "PDF pages",
+          "PDF Pages",
           Some("secondary-shift-p"),
           cx,
           cx.listener(|view, _, window, cx| view.show_pdf(&PdfPages, window, cx)),
@@ -1498,22 +1513,39 @@ impl PdfView {
       .or_else(|| self.is_locked().then(|| format!("{} is password protected", self.title())))
   }
 
+  /// The message that stands in for the pages, with a way back in when the
+  /// document is only waiting for its password.
+  fn render_blocking(&self, message: String, cx: &Context<Self>) -> AnyElement {
+    let theme = cx.theme();
+    let locked = self.is_locked() && self.prompt.is_none();
+    div()
+      .flex_1()
+      .flex()
+      .flex_col()
+      .items_center()
+      .justify_center()
+      .gap_3()
+      .p_8()
+      .text_sm()
+      .text_color(theme.muted_foreground)
+      .child(message)
+      .when(locked, |body| {
+        body.child(
+          Button::new("pdf-enter-password")
+            .label("Enter Password…")
+            .small()
+            .on_click(cx.listener(|view, _, window, cx| view.open_password_prompt(window, cx))),
+        )
+      })
+      .into_any_element()
+  }
+
   fn render_body(&mut self, window: &Window, cx: &Context<Self>) -> AnyElement {
     if let Some(document) = self.markdown.clone().filter(|_| self.shows_markdown()) {
       return div().flex().flex_col().flex_1().min_h_0().child(document).into_any_element();
     }
     if let Some(message) = self.blocking_message() {
-      let theme = cx.theme();
-      return div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .p_8()
-        .text_sm()
-        .text_color(theme.muted_foreground)
-        .child(message)
-        .into_any_element();
+      return self.render_blocking(message, cx);
     }
     self.schedule_renders(window, cx);
     let theme = cx.theme();
@@ -1542,9 +1574,9 @@ impl PdfView {
       selection: selection_overlays,
     };
     let overlay_colors = OverlayColors {
-      selection: theme.accent.opacity(0.4),
-      match_found: theme.warning.opacity(0.35),
-      current_match: theme.warning.opacity(0.6),
+      selection: theme.selection,
+      match_found: theme.warning.opacity(0.22),
+      current_match: theme.warning.opacity(0.55),
     };
     // Until the first page lays out, say what is happening instead of showing
     // an empty surface.
@@ -2175,7 +2207,7 @@ fn write_into(folder: &Path, stem: &str, conversion: &Conversion) -> Result<Writ
     let name = figure.relative_path.rsplit('/').next().unwrap_or(figure.relative_path.as_str());
     save_bytes(&images.join(name), Revision::INITIAL.next(), &figure.png)?;
   }
-  let markdown = retarget_figures(&conversion.markdown, &stem);
+  let markdown = conversion.markdown_for_stem(&stem);
   save_bytes(&path, Revision::INITIAL.next(), markdown.as_bytes())?;
   let loaded = load_text(&path)?;
   Ok(Written {
@@ -2201,29 +2233,6 @@ fn free_name(folder: &Path, stem: &str) -> (PathBuf, String) {
     }
   }
   (first, stem.to_owned())
-}
-
-/// Point the figure links at the folder the file actually got.
-fn retarget_figures(markdown: &str, stem: &str) -> String {
-  let folder = openit_core::pdf_markdown::images_dir_name(stem);
-  let mut out = String::with_capacity(markdown.len());
-  for (index, piece) in markdown.split("](").enumerate() {
-    if index > 0 {
-      out.push_str("](");
-      if let Some((link, rest)) = piece.split_once(')')
-        && let Some((_, file)) = link.rsplit_once('/')
-      {
-        out.push_str(&folder);
-        out.push('/');
-        out.push_str(file);
-        out.push(')');
-        out.push_str(rest);
-        continue;
-      }
-    }
-    out.push_str(piece);
-  }
-  out
 }
 
 /// Keep the status bar's conversion progress current while a job runs.
