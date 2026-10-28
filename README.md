@@ -11,9 +11,13 @@ You want to flip a value in a config file or read a README. The choices are a Pr
 
 One file per window. No project, no sidebar, no language server booting in the background.
 
+![A Markdown README open in preview, with headings, a code block, and a table](assets/screenshots/markdown-preview.png)
+
 ## Fast where it counts
 
 Cold start opens straight to the document. Scrolling and mode switches do not stutter. Pick a sibling file from the same folder (click the file name, or Cmd/Ctrl+P) and the window stays put while the document changes.
+
+![Go to File listing the sibling files of the open document](assets/screenshots/go-to-file.png)
 
 The `openit` command hands paths to the running app, or starts one, and returns at once. `oi` is the short name.
 
@@ -22,6 +26,8 @@ Rust on GPUI. Native on macOS, Windows, and Linux.
 ## Config files
 
 Text and code open in the editor: syntax highlighting, find and replace, go to line, multicursor. JSON, JSONC, and JSON5 get schema errors inline, without a language server. Those errors do not block save.
+
+![A JSON config in the editor, dark theme, with a schema error shown inline](assets/screenshots/json-schema-errors.png)
 
 Save is explicit. Autosave is opt-in. Quit asks Save, Discard, or Cancel. A crash returns the draft on relaunch and never writes over the original file.
 
@@ -36,6 +42,11 @@ Remote images and schemas stay off until you allow the domain.
 PDFs scroll, zoom, and search. Select and copy the text on the page. One click writes a Markdown version next to the file, figures included.
 
 Images rotate, flip, and export. SVG too.
+
+<p>
+  <img src="assets/screenshots/pdf.png" width="49%" alt="A PDF open in the viewer, dark theme">
+  <img src="assets/screenshots/image.png" width="49%" alt="The Apollo 8 Earthrise photo open in the image viewer, dark theme">
+</p>
 
 A type OpenIt cannot read still opens: the path goes to the system default instead of a window that only knows how to refuse.
 
