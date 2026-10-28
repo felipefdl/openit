@@ -43,8 +43,6 @@ allow = [
   # cbindgen (build script of gpui-pre's wgpu stack), dwrote (Windows text on
   # gpui-pre-windows), option-ext (dirs-sys, via gpui-kit), nucleo-matcher.
   "MPL-2.0",
-  # libbz2-rs-sys, pulled by gpui-pre-reqwest-client through bzip2.
-  "bzip2-1.0.6",
 ]
 unused-allowed-license = "deny"
 

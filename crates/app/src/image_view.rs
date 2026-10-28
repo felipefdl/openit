@@ -10,7 +10,7 @@ use gpui_kit::prelude::{FluentBuilder, InteractiveElement};
 use gpui_kit::{
   App, AppContext, BorrowAppContext, Bounds, ContentMask, Context, Corners, DevicePixels, ExternalPaths, IntoElement,
   MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PinchEvent, Pixels, Point, Render,
-  ScrollDelta, ScrollWheelEvent, Size, Styled, Task, Window, canvas, div, px, size,
+  ScrollDelta, ScrollEvent, Size, Styled, Task, Window, canvas, div, px, size,
 };
 use openit_core::document::{ImageFormat, LoadedImage, Revision, load_image, probe_image};
 use openit_core::kind::DocumentKind;
@@ -1539,7 +1539,7 @@ impl ImageView {
       .flex_1()
       .min_h_0()
       .overflow_hidden()
-      .on_scroll_wheel(cx.listener(Self::on_scroll))
+      .on_scroll(cx.listener(Self::on_scroll))
       .on_pinch(cx.listener(Self::on_pinch))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -1584,7 +1584,7 @@ impl ImageView {
       .into_any_element()
   }
 
-  fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+  fn on_scroll(&mut self, event: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
     let delta = match event.delta {
       ScrollDelta::Pixels(point) => point,
       ScrollDelta::Lines(point) => Point {
@@ -1592,7 +1592,7 @@ impl ImageView {
         y: px(point.y * 20.),
       },
     };
-    if event.modifiers.secondary() {
+    if event.modifiers.secondary(cx) {
       if let Some(scale) = self.scale() {
         let step = 1. + f32::from(delta.y) / 200.;
         self.set_scale(scale * step.clamp(0.5, 2.0), Some(event.position), cx);

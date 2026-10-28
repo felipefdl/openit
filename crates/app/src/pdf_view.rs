@@ -15,7 +15,7 @@ use gpui_kit::prelude::{FluentBuilder as _, InteractiveElement as _, StatefulInt
 use gpui_kit::{
   AnyElement, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds, ContentMask, Context, Corners,
   Entity, ExternalPaths, FocusHandle, IntoElement, MouseButton, ParentElement as _, PinchEvent, Pixels, Point, Render,
-  ScrollDelta, ScrollWheelEvent, Size, Styled as _, Subscription, Task, Window, canvas, div, px, size,
+  ScrollDelta, ScrollEvent, Size, Styled as _, Subscription, Task, Window, canvas, div, px, size,
 };
 use openit_core::document::{Loaded, LoadedPdf, Revision, load_pdf, load_text};
 use openit_core::pdf::{DisplayRect, PageGeometry, PdfDocument, PdfOpenError, open_pdf, render_page};
@@ -1298,7 +1298,7 @@ impl PdfView {
     self.scroll_to_page(self.page_count().unwrap_or(1).saturating_sub(1), cx);
   }
 
-  fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+  fn on_scroll(&mut self, event: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
     let delta = match event.delta {
       ScrollDelta::Pixels(point) => point,
       ScrollDelta::Lines(point) => Point {
@@ -1306,7 +1306,7 @@ impl PdfView {
         y: px(point.y * 20.),
       },
     };
-    if event.modifiers.secondary() {
+    if event.modifiers.secondary(cx) {
       let step = 1. + f32::from(delta.y) / 200.;
       self.set_scale(self.scale() * step.clamp(0.5, 2.0), Some(event.position), cx);
       return;
@@ -1556,7 +1556,7 @@ impl PdfView {
       .flex_1()
       .min_h_0()
       .overflow_hidden()
-      .on_scroll_wheel(cx.listener(Self::on_scroll))
+      .on_scroll(cx.listener(Self::on_scroll))
       .on_pinch(cx.listener(Self::on_pinch))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))
