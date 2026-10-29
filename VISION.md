@@ -61,6 +61,8 @@ The View menu offers Readable, Wide, and Full Width Markdown preview presets. Th
 
 A subdued contextual status bar provides useful information: line/column and language for text, dimensions and format for images, and page position for PDFs. Reading gets the quieter frame: Markdown preview hides the bar, editing keeps it, and a menu item pins it visible everywhere for people who want it there. A source warning or an error brings it back on its own. There are no sidebars: PDF search shows its results in a list under the find bar, not in a panel. A click on the title bar file name, or Cmd/Ctrl+P, opens a transient list of files in the open document's directory; a pick replaces the document in the same window.
 
+A text file with uncommitted git changes shows a compact diff button in the title row, and the nearby-files list marks changed files. The diff is read-only; staging and committing stay out of scope.
+
 ### Make remote access a visible choice
 
 Document rendering and validation use local or cached resources by default, with an editable starter allowlist for common remote sources such as GitHub. Starter entries can be removed in settings.
