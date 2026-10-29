@@ -68,17 +68,65 @@ fn in_repository(dir: &Path) -> bool {
 
 /// Run git in `dir` and return its stdout, or `None` with a `debug` log on any failure.
 ///
-/// `core.fsmonitor` is forced off so a repository's own configuration cannot run
-/// a command just because a file in it was opened.
+/// Opening a file must never run a command a repository's configuration names:
+/// `core.fsmonitor` is forced off and every configured content filter is blanked
+/// (see [`filter_overrides`]). Paths are literal, so a name such as `[ab].rs`
+/// never matches another file.
 fn run_git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-  let output = Command::new("git")
+  let output = git_command(dir).args(filter_overrides(dir)).args(args).output();
+  read_output(dir, output)
+}
+
+/// Git in `dir` with fsmonitor off, literal pathspecs, no optional locks, and no stdin.
+fn git_command(dir: &Path) -> Command {
+  let mut command = Command::new("git");
+  command
     .arg("-C")
     .arg(dir)
     .args(["-c", "core.fsmonitor=false"])
-    .args(args)
+    .env("GIT_LITERAL_PATHSPECS", "1")
     .env("GIT_OPTIONAL_LOCKS", "0")
-    .stdin(Stdio::null())
-    .output();
+    .stdin(Stdio::null());
+  command
+}
+
+/// `-c` arguments that blank the clean, smudge, and process commands of every
+/// filter driver the repository's configuration defines, and make none required.
+/// A diff against the working tree would otherwise run a clean filter. Reading
+/// configuration runs nothing; with no filter configured the list is empty.
+fn filter_overrides(dir: &Path) -> Vec<String> {
+  let Ok(output) = git_command(dir)
+    .args(["config", "--name-only", "-z", "--get-regexp", r"^filter\."])
+    .output()
+  else {
+    return Vec::new();
+  };
+  // Exit status 1 means no filter is configured.
+  if !output.status.success() {
+    return Vec::new();
+  }
+  let mut drivers: Vec<String> = output
+    .stdout
+    .split(|byte| *byte == 0)
+    .filter_map(|key| {
+      let key = std::str::from_utf8(key).ok()?;
+      let (driver, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+      Some(driver.to_owned())
+    })
+    .collect();
+  drivers.sort();
+  drivers.dedup();
+  drivers
+    .iter()
+    .flat_map(|driver| {
+      ["clean=", "smudge=", "process=", "required=false"]
+        .map(|setting| ["-c".to_owned(), format!("filter.{driver}.{setting}")])
+    })
+    .flatten()
+    .collect()
+}
+
+fn read_output(dir: &Path, output: std::io::Result<std::process::Output>) -> Option<Vec<u8>> {
   match output {
     Ok(output) if output.status.success() => Some(output.stdout),
     Ok(output) => {
@@ -232,5 +280,37 @@ mod tests {
 
     assert!(changed_files(dir.path()).is_empty());
     assert_eq!(patch(&dir.path().join("file.txt")), None);
+  }
+
+  #[test]
+  fn a_file_name_with_glob_characters_names_only_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    super::test_support::commit(dir.path(), &[("a.rs", "one\n"), ("[ab].rs", "one\n")]).unwrap();
+    fs::write(dir.path().join("a.rs"), "two\n").unwrap();
+
+    assert_eq!(patch(&dir.path().join("[ab].rs")), None);
+    assert!(patch(&dir.path().join("a.rs")).is_some());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_configured_clean_filter_never_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::test_support::commit(root, &[(".gitattributes", "*.txt filter=probe\n"), ("notes.txt", "one\n")]).unwrap();
+    let marker = root.join("filter-ran");
+    git(
+      root,
+      &["config", "filter.probe.clean", &format!("touch '{}'; cat", marker.display())],
+    );
+    git(root, &["config", "filter.probe.required", "true"]);
+    fs::write(root.join("notes.txt"), "two\n").unwrap();
+
+    let changed = changed_files(root);
+    let notes = patch(&root.join("notes.txt"));
+
+    assert!(!marker.exists(), "the clean filter ran");
+    assert!(changed.contains("notes.txt"));
+    assert!(notes.unwrap().contains("+two"));
   }
 }

@@ -66,6 +66,8 @@ pub struct NearbyPicker {
   pending_confirm: Option<usize>,
   /// The directory whose git changes were last asked for; one query per directory.
   changes_asked: Option<PathBuf>,
+  /// Bumped per git request; only the latest request's answer is kept.
+  changes_generation: u64,
   /// The answer for `changes_asked`, once git has given it.
   changes: Option<DirChanges>,
 }
@@ -98,6 +100,7 @@ impl NearbyPicker {
       pending_selection: None,
       pending_confirm: None,
       changes_asked: None,
+      changes_generation: 0,
       changes: None,
     };
     picker.schedule(false, cx);
@@ -174,6 +177,8 @@ impl NearbyPicker {
       return;
     }
     self.changes_asked = Some(dir.to_path_buf());
+    self.changes_generation = self.changes_generation.saturating_add(1);
+    let generation = self.changes_generation;
     let dir = dir.to_path_buf();
     cx.spawn(async move |this, cx| {
       let names = cx
@@ -183,7 +188,8 @@ impl NearbyPicker {
         })
         .await;
       let _ = this.update(cx, |this, cx| {
-        if this.changes_asked.as_ref() == Some(&dir) {
+        // A later request supersedes this one, even for the same directory.
+        if this.changes_generation == generation {
           this.changes = Some(DirChanges { dir, names });
           cx.notify();
         }

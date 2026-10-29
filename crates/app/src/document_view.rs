@@ -181,6 +181,8 @@ impl Render for CursorStatus {
 struct Changes {
   /// The patch the state was built from, so an identical report keeps the scroll position.
   patch: String,
+  /// The highlighting language the diff was built with; a language pick rebuilds it.
+  language: &'static str,
   state: Entity<DiffState>,
   /// Whether the changes cover the body, over the current mode.
   showing: bool,
@@ -704,6 +706,10 @@ impl DocumentView {
     let path = self.session.path.clone();
     let window = self.session.window_handle;
     self.changes_task = Some(cx.spawn(async move |this, cx| {
+      // A PDF window marks its embedded document after opening it, so the flag is read once that has run.
+      if this.read_with(cx, |view, _| view.embedded).unwrap_or(true) {
+        return;
+      }
       let report = cx.background_spawn(async move { openit_core::git::patch(&path) }).await;
       let _ = window.update(cx, |_, window, cx| {
         this.update(cx, |view, cx| view.apply_changes(report, window, cx))
@@ -718,6 +724,7 @@ impl DocumentView {
     }
     if let (Some(report), Some(changes)) = (&report, &self.changes)
       && *report == changes.patch
+      && changes.language == self.language()
     {
       return;
     }
@@ -735,20 +742,28 @@ impl DocumentView {
     let Some((file, report)) = parsed else {
       let was_showing = self.showing_changes();
       self.changes = None;
-      if was_showing {
+      // An open dialog keeps the keyboard; closing it refocuses the document.
+      if was_showing && self.overlay.is_none() {
         self.focus_surface(window, cx);
       }
       cx.notify();
       return;
     };
-    let file = file.with_language(self.language());
+    let language = self.language();
+    let file = file.with_language(language);
     if let Some(changes) = &mut self.changes {
       changes.state.update(cx, |state, cx| state.set_files([file], cx));
       changes.patch = report;
+      changes.language = language;
     } else {
       let mode = diff_mode_for(window);
       let state = cx.new(|cx| DiffState::new([file], cx).with_mode(mode));
-      self.changes = Some(Changes { patch: report, state, showing: false });
+      self.changes = Some(Changes {
+        patch: report,
+        language,
+        state,
+        showing: false,
+      });
     }
     cx.notify();
   }
@@ -1016,6 +1031,9 @@ impl DocumentView {
       return;
     }
     self.language_override = Some(name);
+    if let Some(patch) = self.changes.as_ref().map(|changes| changes.patch.clone()) {
+      self.apply_changes(Some(patch), window, cx);
+    }
     let is_markdown = self.is_markdown();
     if self.mode == Mode::Preview && !is_markdown {
       self.mode = Mode::Edit;
@@ -6031,6 +6049,47 @@ pub(crate) mod tests {
     cx.simulate_resize(gpui_kit::size(gpui_kit::px(1100.), gpui_kit::px(800.)));
     cx.run_until_parked();
     assert_eq!(diff_mode(cx), DiffMode::Split);
+  }
+
+  #[gpui_kit::test]
+  fn changes_that_go_away_under_an_open_picker_leave_it_the_keyboard(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_nearby_picker(&crate::actions::GoToFile, window, cx)));
+    cx.run_until_parked();
+
+    fs::write(repo.path().join("notes.txt"), "one\n").unwrap();
+    cx.update(|window, cx| view.update(cx, |view, cx| view.on_disk_change(window, cx)));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+      let view = view.read(cx);
+      assert!(view.changes.is_none());
+      assert!(view.overlay.is_some(), "the picker stays open");
+      let editor = view.editor.as_ref().unwrap();
+      assert!(
+        !gpui_kit::Focusable::focus_handle(editor.read(cx), cx).is_focused(window),
+        "the editor must not take the picker's keyboard"
+      );
+    });
+  }
+
+  #[gpui_kit::test]
+  fn a_language_pick_rebuilds_the_changes_in_that_language(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.set_language("rust", window, cx)));
+
+    let language = view.read_with(cx, |view, cx| {
+      view.changes.as_ref().unwrap().state.read(cx).files()[0].language()
+    });
+    assert_eq!(language.as_ref(), "rust");
   }
   #[cfg(test)]
   impl DocumentView {
