@@ -289,13 +289,15 @@ fn command_items(listing: &Listing, current_file: Option<&str>, changed: Option<
     Listing::Pending => Vec::new(),
     Listing::Rows { items, .. } => items
       .iter()
-      .map(|ranked| {
-        let has_changes = !ranked.entry.is_dir && changed.is_some_and(|names| names.contains(&ranked.entry.name));
-        command_item(ranked, current_file, has_changes)
-      })
+      .map(|ranked| command_item(ranked, current_file, row_has_changes(ranked, changed)))
       .collect(),
     Listing::Failed { message } => vec![CommandItem::new().label(message.clone()).disabled(true)],
   }
+}
+
+/// Whether a row carries the uncommitted-changes marker: a file git named as changed.
+fn row_has_changes(ranked: &Ranked, changed: Option<&HashSet<String>>) -> bool {
+  !ranked.entry.is_dir && changed.is_some_and(|names| names.contains(&ranked.entry.name))
 }
 
 fn command_item(ranked: &Ranked, current_file: Option<&str>, has_changes: bool) -> CommandItem {
@@ -448,7 +450,7 @@ impl NearbyPicker {
     let changed = self.listed_changes();
     items
       .iter()
-      .filter(|ranked| !ranked.entry.is_dir && changed.is_some_and(|names| names.contains(&ranked.entry.name)))
+      .filter(|ranked| row_has_changes(ranked, changed))
       .map(Ranked::display_name)
       .collect()
   }

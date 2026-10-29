@@ -778,7 +778,10 @@ impl DocumentView {
     if let Some(changes) = &mut self.changes {
       changes.showing = !changes.showing;
     }
-    self.focus_surface(window, cx);
+    // An open dialog keeps the keyboard; closing it refocuses the document.
+    if self.overlay.is_none() {
+      self.focus_surface(window, cx);
+    }
     cx.notify();
   }
   /// Whether the changes cover the body, over the current mode.
@@ -6068,6 +6071,30 @@ pub(crate) mod tests {
     cx.update(|window, cx| {
       let view = view.read(cx);
       assert!(view.changes.is_none());
+      assert!(view.overlay.is_some(), "the picker stays open");
+      let editor = view.editor.as_ref().unwrap();
+      assert!(
+        !gpui_kit::Focusable::focus_handle(editor.read(cx), cx).is_focused(window),
+        "the editor must not take the picker's keyboard"
+      );
+    });
+  }
+
+  #[gpui_kit::test]
+  fn hiding_the_changes_under_an_open_picker_leaves_it_the_keyboard(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_nearby_picker(&crate::actions::GoToFile, window, cx)));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+
+    cx.update(|window, cx| {
+      let view = view.read(cx);
+      assert!(!view.showing_changes());
       assert!(view.overlay.is_some(), "the picker stays open");
       let editor = view.editor.as_ref().unwrap();
       assert!(

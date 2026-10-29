@@ -73,7 +73,8 @@ fn in_repository(dir: &Path) -> bool {
 /// (see [`filter_overrides`]). Paths are literal, so a name such as `[ab].rs`
 /// never matches another file.
 fn run_git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-  let output = git_command(dir).args(filter_overrides(dir)).args(args).output();
+  let overrides = filter_overrides(dir)?;
+  let output = git_command(dir).args(overrides).args(args).output();
   read_output(dir, output)
 }
 
@@ -94,36 +95,51 @@ fn git_command(dir: &Path) -> Command {
 /// filter driver the repository's configuration defines, and make none required.
 /// A diff against the working tree would otherwise run a clean filter. Reading
 /// configuration runs nothing; with no filter configured the list is empty.
-fn filter_overrides(dir: &Path) -> Vec<String> {
-  let Ok(output) = git_command(dir)
-    .args(["config", "--name-only", "-z", "--get-regexp", r"^filter\."])
-    .output()
-  else {
-    return Vec::new();
+///
+/// Fails closed: `None` when the configuration cannot be read or a driver name
+/// cannot be passed back through `-c` (not UTF-8, or holding `=`), so no query runs.
+/// Keys are matched as bytes from the full list: `--get-regexp` follows the locale
+/// and silently misses names that are not valid in it.
+fn filter_overrides(dir: &Path) -> Option<Vec<String>> {
+  let output = match git_command(dir).args(["config", "--list", "--name-only", "-z"]).output() {
+    Ok(output) => output,
+    Err(error) => {
+      tracing::debug!(%error, "git unavailable");
+      return None;
+    },
   };
-  // Exit status 1 means no filter is configured.
   if !output.status.success() {
-    return Vec::new();
+    tracing::debug!(status = %output.status, dir = %dir.display(), "git configuration unreadable");
+    return None;
   }
-  let mut drivers: Vec<String> = output
-    .stdout
-    .split(|byte| *byte == 0)
-    .filter_map(|key| {
-      let key = std::str::from_utf8(key).ok()?;
-      let (driver, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
-      Some(driver.to_owned())
-    })
-    .collect();
+  let mut drivers = Vec::new();
+  for key in output.stdout.split(|byte| *byte == 0) {
+    let Some(rest) = key.strip_prefix(b"filter.") else {
+      continue;
+    };
+    let driver = std::str::from_utf8(rest)
+      .ok()
+      .and_then(|rest| rest.rsplit_once('.'))
+      .map(|(driver, _)| driver)
+      .filter(|driver| !driver.contains('='));
+    let Some(driver) = driver else {
+      tracing::debug!(dir = %dir.display(), "a filter driver name cannot be overridden; git skipped");
+      return None;
+    };
+    drivers.push(driver.to_owned());
+  }
   drivers.sort();
   drivers.dedup();
-  drivers
-    .iter()
-    .flat_map(|driver| {
-      ["clean=", "smudge=", "process=", "required=false"]
-        .map(|setting| ["-c".to_owned(), format!("filter.{driver}.{setting}")])
-    })
-    .flatten()
-    .collect()
+  Some(
+    drivers
+      .iter()
+      .flat_map(|driver| {
+        ["clean=", "smudge=", "process=", "required=false"]
+          .map(|setting| ["-c".to_owned(), format!("filter.{driver}.{setting}")])
+      })
+      .flatten()
+      .collect(),
+  )
 }
 
 fn read_output(dir: &Path, output: std::io::Result<std::process::Output>) -> Option<Vec<u8>> {
@@ -312,5 +328,35 @@ mod tests {
     assert!(!marker.exists(), "the clean filter ran");
     assert!(changed.contains("notes.txt"));
     assert!(notes.unwrap().contains("+two"));
+  }
+}
+
+#[cfg(all(test, unix))]
+mod filter_name_tests {
+  use std::fs;
+  use std::io::Write as _;
+
+  use super::{changed_files, patch};
+
+  #[test]
+  fn a_filter_driver_name_that_cannot_be_overridden_skips_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::test_support::commit(root, &[("notes.txt", "one\n")]).unwrap();
+    let marker = root.join("filter-ran");
+    let mut attributes = fs::File::create(root.join(".gitattributes")).unwrap();
+    attributes.write_all(b"*.txt filter=\xff\n").unwrap();
+    let mut config = fs::OpenOptions::new().append(true).open(root.join(".git/config")).unwrap();
+    config.write_all(b"[filter \"\xff\"]\n\tclean = touch '").unwrap();
+    config.write_all(marker.to_str().unwrap().as_bytes()).unwrap();
+    config.write_all(b"'; cat\n\trequired = true\n").unwrap();
+    fs::write(root.join("notes.txt"), "two\n").unwrap();
+
+    let changed = changed_files(root);
+    let notes = patch(&root.join("notes.txt"));
+
+    assert!(!marker.exists(), "the clean filter ran");
+    assert!(changed.is_empty());
+    assert_eq!(notes, None);
   }
 }
