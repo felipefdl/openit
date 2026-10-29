@@ -6,7 +6,7 @@ use crate::actions::{
   ActualSize, CheckForUpdates, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find,
   FlipHorizontal, FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages,
   Quit, RotateLeft, RotateRight, Save, SelectNextOccurrence, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode,
-  ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
+  ShowChanges, ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 
@@ -81,6 +81,7 @@ fn build_with_background(settings: &Settings, current_background: Option<ImageBa
     ]),
     Menu::new("View").items([
       MenuItem::action("Toggle Preview / Edit", ToggleMode),
+      MenuItem::action("Show Changes", ShowChanges),
       MenuItem::action("Always Show Status Bar", ToggleAlwaysShowStatusBar).checked(settings.always_show_status_bar),
       MenuItem::submenu(preview_width),
       MenuItem::separator(),

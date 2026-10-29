@@ -33,6 +33,8 @@ actions!(
     Save,
     /// Switch a Markdown document between Preview and Edit.
     ToggleMode,
+    /// Show a text document's uncommitted git changes, or return to the document.
+    ShowChanges,
     /// Open the color theme picker.
     ColorTheme,
     /// Open the UI font picker.

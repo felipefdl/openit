@@ -559,6 +559,8 @@ fn bind_keys(cx: &mut App) {
     KeyBinding::new("ctrl-v", gpui_kit::component::input::Paste, Some("EmptyView")),
     KeyBinding::new("cmd-shift-e", actions::ToggleMode, None),
     KeyBinding::new("ctrl-shift-e", actions::ToggleMode, None),
+    KeyBinding::new("cmd-shift-d", actions::ShowChanges, None),
+    KeyBinding::new("ctrl-shift-d", actions::ShowChanges, None),
     KeyBinding::new("cmd-k cmd-t", actions::ColorTheme, None),
     KeyBinding::new("ctrl-k ctrl-t", actions::ColorTheme, None),
     KeyBinding::new("cmd-k cmd-u", actions::UiFont, None),

@@ -1,6 +1,7 @@
 use crate::actions::{
   CloseWindow, CodeFont, ColorTheme, Find, GoToFile, NextMatch, PreviewBottom, PreviewLineDown, PreviewLineUp,
-  PreviewPageDown, PreviewPageUp, PreviewTop, PreviousMatch, Save, SelectNextOccurrence, ToggleMode, UiFont,
+  PreviewPageDown, PreviewPageUp, PreviewTop, PreviousMatch, Save, SelectNextOccurrence, ShowChanges, ToggleMode,
+  UiFont,
 };
 use crate::drop::{apply_external_paths, external_paths_ring};
 use crate::find_bar::{FindBar, FindBarEvent};
@@ -19,6 +20,7 @@ use crate::theme::{ActivePalette, hsla, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button, tooltip};
 use crate::updater::dialog::{UpdateEvent, UpdateView};
+use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, RopeExt, TabSize};
 use gpui_kit::component::text::{
@@ -27,9 +29,9 @@ use gpui_kit::component::text::{
 use gpui_kit::component::{ActiveTheme, Icon, IconName, TitleBar};
 use gpui_kit::prelude::{FluentBuilder, InteractiveElement, StatefulInteractiveElement};
 use gpui_kit::{
-  AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, IntoElement, KeyDownEvent,
-  MouseButton, ParentElement, PathPromptOptions, PromptLevel, Render, SharedString, Styled, Subscription, Task, Window,
-  div,
+  AnyElement, App, AppContext, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement,
+  KeyDownEvent, MouseButton, ParentElement, PathPromptOptions, PromptLevel, Render, SharedString, Styled, Subscription,
+  Task, Window, div,
 };
 use openit_core::document::{Loaded, Revision, Snapshot};
 use openit_core::kind::DocumentKind;
@@ -164,6 +166,15 @@ impl Render for CursorStatus {
   }
 }
 
+/// A file's uncommitted changes against `HEAD`, as git reported them.
+struct Changes {
+  /// The patch the state was built from, so an identical report keeps the scroll position.
+  patch: String,
+  state: Entity<DiffState>,
+  /// Whether the changes cover the body, over the current mode.
+  showing: bool,
+}
+
 /// Cmd/Ctrl+D progress: the selection the run started from and the occurrence
 /// it added last. Valid while that selection stays active and the text is
 /// unchanged.
@@ -226,6 +237,10 @@ pub struct DocumentView {
   language_override: Option<&'static str>,
   /// Whether another view draws this window's title bar and close guard.
   embedded: bool,
+  /// Uncommitted changes against `HEAD`, while git reports any.
+  changes: Option<Changes>,
+  changes_task: Option<Task<()>>,
+  activation_observation: Option<Subscription>,
 }
 impl DocumentView {
   pub fn open(path: PathBuf, loaded: Loaded, session: SessionId, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -285,6 +300,9 @@ impl DocumentView {
       permission_prompt: PermissionPrompt::Families,
       language_override: None,
       embedded: false,
+      changes: None,
+      changes_task: None,
+      activation_observation: None,
     };
     view.session.saved_text = view.initial_text.clone();
     view.requests_observation = Some(cx.observe_in(&requests, window, |this, requests, window, cx| {
@@ -314,6 +332,13 @@ impl DocumentView {
     }));
     view.settings_store_observation = Some(cx.observe_global::<SettingsStore>(|_, cx| cx.notify()));
     view.session.start_watch(window, cx);
+    // A commit made elsewhere leaves the file untouched, so a window coming back to the front asks again.
+    view.activation_observation = Some(cx.observe_window_activation(window, |this, window, cx| {
+      if window.is_window_active() {
+        this.refresh_changes(cx);
+      }
+    }));
+    view.refresh_changes(cx);
     if view.mode == Mode::Preview {
       window.focus(&view.focus, cx);
     } else {
@@ -415,6 +440,11 @@ impl DocumentView {
 
   /// Move focus to whichever surface is showing.
   pub fn focus_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(changes) = self.changes.as_ref().filter(|changes| changes.showing) {
+      let focus = changes.state.focus_handle(cx);
+      window.focus(&focus, cx);
+      return;
+    }
     match (&self.mode, self.editor.clone()) {
       (Mode::Edit, Some(editor)) => editor.update(cx, |state, cx| state.focus(window, cx)),
       (Mode::Edit, None) => {
@@ -640,6 +670,85 @@ impl DocumentView {
   }
   pub(crate) fn on_disk_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.session.on_disk_change(window, cx);
+    self.refresh_changes(cx);
+  }
+  /// Ask git for the file's changes against `HEAD`, off the UI thread. Documents
+  /// without a path, and documents another view hosts, have none.
+  pub(crate) fn refresh_changes(&mut self, cx: &Context<Self>) {
+    if self.embedded || !self.session.has_path() {
+      return;
+    }
+    let path = self.session.path.clone();
+    let window = self.session.window_handle;
+    self.changes_task = Some(cx.spawn(async move |this, cx| {
+      let report = cx.background_spawn(async move { openit_core::git::patch(&path) }).await;
+      let _ = window.update(cx, |_, window, cx| {
+        this.update(cx, |view, cx| view.apply_changes(report, window, cx))
+      });
+    }));
+  }
+  /// Install a git report: build or refresh the diff, or drop it and return to
+  /// the document when the file no longer differs from `HEAD`.
+  fn apply_changes(&mut self, report: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    if self.embedded {
+      return;
+    }
+    if let (Some(report), Some(changes)) = (&report, &self.changes)
+      && *report == changes.patch
+    {
+      return;
+    }
+    let parsed = report.and_then(|report| match DiffFile::parse(&report) {
+      Ok(files) => files
+        .into_iter()
+        .next()
+        .filter(DiffFile::has_changes)
+        .map(|file| (file, report)),
+      Err(error) => {
+        tracing::debug!(%error, "git patch did not parse");
+        None
+      },
+    });
+    let Some((file, report)) = parsed else {
+      let was_showing = self.showing_changes();
+      self.changes = None;
+      if was_showing {
+        self.focus_surface(window, cx);
+      }
+      cx.notify();
+      return;
+    };
+    let file = file.with_language(self.language());
+    if let Some(changes) = &mut self.changes {
+      changes.state.update(cx, |state, cx| state.set_files([file], cx));
+      changes.patch = report;
+    } else {
+      let state = cx.new(|cx| DiffState::new([file], cx));
+      self.changes = Some(Changes { patch: report, state, showing: false });
+    }
+    cx.notify();
+  }
+  /// Cover the body with the uncommitted changes, or return to the document.
+  pub fn toggle_changes(&mut self, _: &ShowChanges, window: &mut Window, cx: &mut Context<Self>) {
+    if self.changes.is_none() {
+      return;
+    }
+    if !self.showing_changes() {
+      self.dismiss_find(window, cx);
+    }
+    if let Some(changes) = &mut self.changes {
+      changes.showing = !changes.showing;
+    }
+    self.focus_surface(window, cx);
+    cx.notify();
+  }
+  /// Whether the changes cover the body, over the current mode.
+  fn showing_changes(&self) -> bool {
+    self.changes.as_ref().is_some_and(|changes| changes.showing)
+  }
+  /// Whether the editor is the surface showing, not the preview or the changes.
+  fn shows_editor(&self) -> bool {
+    self.mode == Mode::Edit && !self.showing_changes()
   }
   /// Whether the file changed on disk while this buffer had unsaved edits.
   pub const fn external_change(&self) -> bool {
@@ -955,16 +1064,17 @@ impl DocumentView {
   fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.overlay = None;
     self.overlay_subscription = None;
-    match (&self.mode, &self.editor) {
-      (Mode::Edit, Some(editor)) => editor.update(cx, |state, cx| state.focus(window, cx)),
-      _ => window.focus(&self.focus, cx),
-    }
+    self.focus_surface(window, cx);
     cx.notify();
   }
   /// Switch between Preview and Edit. No-op unless the language is Markdown.
   pub fn toggle_mode(&mut self, _: &ToggleMode, window: &mut Window, cx: &mut Context<Self>) {
     if !self.is_markdown() {
       return;
+    }
+    // The button names a mode, so from the changes it goes there too.
+    if let Some(changes) = &mut self.changes {
+      changes.showing = false;
     }
     // The find bar belongs to the surface it searches; it closes before the switch, while that
     // surface still knows the strip to give back.
@@ -991,6 +1101,9 @@ impl DocumentView {
   /// Find in the document: the find bar over the preview, or over the editor,
   /// where it drives the editor's search and can replace.
   fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+    if self.showing_changes() {
+      return;
+    }
     if let Some(find) = &self.find {
       find.update(cx, |find, cx| find.focus(window, cx));
       return;
@@ -1034,7 +1147,7 @@ impl DocumentView {
 
   /// Open the find bar with its replace row. The editor only.
   fn open_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    if self.mode != Mode::Edit {
+    if !self.shows_editor() {
       return;
     }
     self.open_find(&Find, window, cx);
@@ -1314,6 +1427,9 @@ impl DocumentView {
   /// words only. From the search field, the first press selects the current
   /// search match and moves focus to the editor, so typing edits the selections.
   fn select_next_occurrence(&mut self, _: &SelectNextOccurrence, window: &mut Window, cx: &mut Context<Self>) {
+    if self.showing_changes() {
+      return;
+    }
     let Some(editor) = self.editor.clone() else {
       return;
     };
@@ -1558,6 +1674,21 @@ impl DocumentView {
       // them and macOS zooms the window on the second one.
       .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
       .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    if self.changes.is_some() {
+      let tip = if self.showing_changes() {
+        "Hide Changes"
+      } else {
+        "Show Changes"
+      };
+      actions = actions.child(toolbar_button(
+        "changes-toggle",
+        Icon::empty().path("icons/file-diff.svg"),
+        tip,
+        Some("secondary-shift-d"),
+        cx,
+        cx.listener(|this, _, window, cx| this.toggle_changes(&ShowChanges, window, cx)),
+      ));
+    }
     if self.is_markdown() {
       // The button carries the mode a click moves to: a pen to write, an eye to read.
       let (icon, tip) = match self.mode {
@@ -1590,7 +1721,7 @@ impl DocumentView {
   /// The caret readout entity, which only the editor shows. Preview reports
   /// nothing, where a stale line and column would sit there unchanged.
   fn caret_readout(&self) -> Option<Entity<CursorStatus>> {
-    self.cursor_status_view.as_ref().filter(|_| self.mode == Mode::Edit).cloned()
+    self.cursor_status_view.as_ref().filter(|_| self.shows_editor()).cloned()
   }
   fn settings_error_message(cx: &App) -> Option<String> {
     cx.try_global::<SettingsStore>()
@@ -1606,7 +1737,7 @@ impl DocumentView {
   /// Whether the status bar is drawn. Preview keeps the page clean by hiding it,
   /// unless the reader pinned it visible or it has a problem to report.
   fn shows_status_bar(&self, cx: &App) -> bool {
-    self.mode == Mode::Edit
+    self.shows_editor()
       || cx
         .try_global::<AppSettings>()
         .is_some_and(|settings| settings.0.always_show_status_bar)
@@ -1615,7 +1746,7 @@ impl DocumentView {
   /// Whether the status bar floats over the buffer. It stays in normal flow when
   /// the permission bar is up, so Allow is not covered.
   fn status_bar_overlays_the_buffer(&self, cx: &App) -> bool {
-    self.mode == Mode::Edit && self.requests.read(cx).is_empty()
+    self.shows_editor() && self.requests.read(cx).is_empty()
   }
   #[expect(
     clippy::needless_pass_by_ref_mut,
@@ -1711,6 +1842,13 @@ impl DocumentView {
       .into_any_element()
   }
   fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    if let Some(changes) = self.changes.as_ref().filter(|changes| changes.showing) {
+      return div()
+        .flex_1()
+        .min_h_0()
+        .child(Diff::new(&changes.state).header_visible(false).size_full())
+        .into_any_element();
+    }
     match self.mode {
       Mode::Edit => self.render_editor_body(window, cx),
       Mode::Preview => {
@@ -1917,13 +2055,14 @@ impl Render for DocumentView {
     let shows_status_bar = self.shows_status_bar(cx);
     let theme = cx.theme();
     div()
-      .key_context(if self.mode == Mode::Preview {
+      .key_context(if self.mode == Mode::Preview && !self.showing_changes() {
         "DocumentView MarkdownPreview"
       } else {
         "DocumentView"
       })
       .track_focus(&self.focus)
       .on_action(cx.listener(Self::toggle_mode))
+      .on_action(cx.listener(Self::toggle_changes))
       .on_action(cx.listener(Self::save))
       .on_action(cx.listener(Self::close))
       .on_action(cx.listener(Self::open_theme_picker))
@@ -1975,7 +2114,7 @@ impl Render for DocumentView {
 pub(crate) mod tests {
   use std::{fs, sync::Arc, time::Duration};
 
-  use crate::actions::CloseWindow;
+  use crate::actions::{CloseWindow, ShowChanges, ToggleMode};
   use crate::cache::ResourceCacheHandle;
   use crate::fetch::{FakeFetcher, FetchError, Fetcher};
   use crate::image_cache::{
@@ -5739,6 +5878,110 @@ pub(crate) mod tests {
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
     assert!(released_image_count_for_test() >= 1);
+  }
+
+  /// Open `name` from a fresh repository whose one commit holds it as `committed`,
+  /// with `on_disk` written over it afterwards.
+  fn open_from_repository<'a>(
+    cx: &'a mut TestAppContext,
+    repo: &std::path::Path,
+    name: &str,
+    committed: &str,
+    on_disk: &str,
+  ) -> (Entity<DocumentView>, &'a mut VisualTestContext) {
+    openit_core::git::test_support::commit(repo, &[(name, committed)]).unwrap();
+    let path = repo.join(name);
+    fs::write(&path, on_disk).unwrap();
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) = cx.add_window_view(|window, cx| DocumentView::open(path, loaded, SessionId::new(), window, cx));
+    cx.run_until_parked();
+    (view, cx)
+  }
+
+  #[gpui_kit::test]
+  fn a_changed_file_offers_its_changes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+
+    assert!(view.read_with(cx, |view, _| view.changes.is_some()));
+  }
+
+  #[gpui_kit::test]
+  fn a_clean_file_offers_no_changes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "one\n");
+
+    assert!(view.read_with(cx, |view, _| view.changes.is_none()));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+    assert!(!view.read_with(cx, |view, _| view.showing_changes()));
+  }
+
+  #[gpui_kit::test]
+  fn the_changes_shortcut_covers_the_document_and_returns_to_its_mode(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-shift-d", ShowChanges, None)]));
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.md", "# One\n", "# Two\n");
+    assert_eq!(view.read_with(cx, |view, _| view.mode()), Mode::Preview);
+
+    cx.simulate_keystrokes("cmd-shift-d");
+    assert!(view.read_with(cx, |view, _| view.showing_changes()));
+
+    cx.simulate_keystrokes("cmd-shift-d");
+    view.read_with(cx, |view, _| {
+      assert!(!view.showing_changes());
+      assert_eq!(view.mode(), Mode::Preview);
+    });
+  }
+
+  #[gpui_kit::test]
+  fn the_changes_hide_the_editor_status_and_the_mode_button_leaves_them(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.md", "# One\n", "# Two\n");
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_mode(&ToggleMode, window, cx)));
+    assert_eq!(view.read_with(cx, |view, _| view.mode()), Mode::Edit);
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+    view.read_with(cx, |view, cx| {
+      assert!(view.showing_changes());
+      assert!(!view.shows_status_bar(cx), "the changes read like the preview");
+      assert!(view.caret_readout().is_none());
+    });
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_mode(&ToggleMode, window, cx)));
+    view.read_with(cx, |view, _| {
+      assert!(!view.showing_changes());
+      assert_eq!(view.mode(), Mode::Preview, "the button goes to the mode it names");
+    });
+  }
+
+  #[gpui_kit::test]
+  fn changes_that_go_away_while_shown_return_to_the_document(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+    cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_changes(&ShowChanges, window, cx)));
+    assert!(view.read_with(cx, |view, _| view.showing_changes()));
+
+    fs::write(repo.path().join("notes.txt"), "one\n").unwrap();
+    cx.update(|window, cx| view.update(cx, |view, cx| view.on_disk_change(window, cx)));
+    cx.run_until_parked();
+
+    view.read_with(cx, |view, _| {
+      assert!(view.changes.is_none());
+      assert!(!view.showing_changes());
+      assert_eq!(view.mode(), Mode::Edit);
+    });
   }
   #[cfg(test)]
   impl DocumentView {

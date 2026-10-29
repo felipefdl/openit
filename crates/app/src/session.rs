@@ -506,6 +506,7 @@ impl DocumentSession {
   }
   pub(crate) fn complete_save_result(view: &mut DocumentView, saved: Saved, cx: &mut Context<DocumentView>) {
     view.session.apply_save_result(saved, cx);
+    view.refresh_changes(cx);
     if view.session.close_after_save {
       if !view.is_dirty() && !view.session.external_change {
         view.session.close_after_save = false;

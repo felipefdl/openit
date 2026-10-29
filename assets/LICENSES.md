@@ -94,7 +94,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Lucide (icons/rotate-ccw-square.svg, icons/swatch-book.svg, icons/presentation.svg, icons/notebook-pen.svg, icons/book-open-text.svg, icons/file-code.svg, icons/book-text.svg, icons/image.svg) — https://lucide.dev
+## Lucide (icons/rotate-ccw-square.svg, icons/swatch-book.svg, icons/presentation.svg, icons/notebook-pen.svg, icons/book-open-text.svg, icons/file-code.svg, icons/book-text.svg, icons/image.svg, icons/file-diff.svg) — https://lucide.dev
 
 ISC License
 

@@ -36,7 +36,17 @@ pub fn patch(path: &Path) -> Option<String> {
   let name = name.to_str()?;
   let output = run_git(
     dir,
-    &["diff", "HEAD", "--no-color", "--no-ext-diff", "--no-textconv", "--", name],
+    &[
+      "diff",
+      "HEAD",
+      "--no-color",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "--",
+      name,
+    ],
   )?;
   if output.is_empty() {
     return None;
@@ -87,15 +97,17 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use std::fs;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod test_support {
+  //! Repositories for tests, built with the `git` binary and isolated from the
+  //! user's and the system's git configuration.
+
+  use std::io;
   use std::path::Path;
-  use std::process::Command;
+  use std::process::{Command, Stdio};
 
-  use super::{changed_files, patch};
-
-  fn git(dir: &Path, args: &[&str]) {
+  /// Run git in `dir` with a fixed identity and no signing.
+  pub fn git(dir: &Path, args: &[&str]) -> io::Result<()> {
     let status = Command::new("git")
       .arg("-C")
       .arg(dir)
@@ -108,12 +120,37 @@ mod tests {
         "commit.gpgsign=false",
       ])
       .args(args)
-      .env("GIT_CONFIG_GLOBAL", "/dev/null")
+      .env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
       .env("GIT_CONFIG_NOSYSTEM", "1")
-      .stdout(std::process::Stdio::null())
-      .status()
-      .unwrap();
-    assert!(status.success(), "git {args:?} failed");
+      .stdout(Stdio::null())
+      .status()?;
+    if status.success() {
+      Ok(())
+    } else {
+      Err(io::Error::other(format!("git {args:?} exited with {status}")))
+    }
+  }
+
+  /// Make `dir` a repository whose one commit holds `files` as `(name, text)`.
+  pub fn commit(dir: &Path, files: &[(&str, &str)]) -> io::Result<()> {
+    git(dir, &["init", "-q"])?;
+    for (name, text) in files {
+      std::fs::write(dir.join(name), text)?;
+    }
+    git(dir, &["add", "."])?;
+    git(dir, &["commit", "-q", "-m", "initial"])
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::fs;
+  use std::path::Path;
+
+  use super::{changed_files, patch};
+
+  fn git(dir: &Path, args: &[&str]) {
+    super::test_support::git(dir, args).unwrap();
   }
 
   /// A repository with `clean.txt`, `staged.txt`, `unstaged.txt`, `both.txt`,
