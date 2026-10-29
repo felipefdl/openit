@@ -334,7 +334,7 @@ The title bar file name and Cmd/Ctrl+P open a fuzzy picker over the open documen
 
 ### Git changes
 
-A text document whose file differs from git `HEAD` shows a changes toggle in the title bar; it, View > Show Changes, and Cmd/Ctrl+Shift+D cover the body with a read-only unified diff and return to the previous mode. Details in [Git diff](git-diff.md).
+A text document whose file differs from git `HEAD` shows a changes toggle in the title bar; it, View > Show Changes, and Cmd/Ctrl+Shift+D cover the body with a read-only unified diff and return to the previous mode. The nearby-files picker marks file rows that differ from `HEAD` once git answers for the listed directory. Details in [Git diff](git-diff.md).
 
 ### Chrome
 
@@ -442,4 +442,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-10-22: UI/UX pass covers editor and preview find, keyboard reading, saved-state tracking, picker selection and dismissal, schema diagnostics and completions, image viewing and export, PDF prompts and conversion, permission controls, clipboard detection, window cascade, and shell dialogs.
 - 2026-10-28: One find bar everywhere: the editor drops gpui-kit's search panel for the same centered card as the preview and PDFs, with a case toggle and a replace row driven through gpui-kit's custom-search API. Local schemas in folders with spaces validate.
 - 2026-10-28: gpui-kit 0.8.1 (gpui-pre 0.3.10), jsonschema 0.60.2, uuid 1.29, interprocess 2.4.7, notify 8.2.1, and current dependencies; the duplicate wgpu 29, naga 29, taffy, and cocoa copies leave the tree. Scroll handling follows gpui's rename to `ScrollEvent`/`on_scroll`. resvg stays at 0.46 and ropey at 2.0.0-beta.1 because gpui still pins both.
-- 2026-10-28: Git changes: a text document that differs from `HEAD` shows a changes toggle (also View > Show Changes and Cmd/Ctrl+Shift+D) that covers the body with gpui-kit's read-only unified diff. Git runs as the `git` binary off the UI thread; no git, no repository, or a failure means no toggle. Details in [Git diff](git-diff.md).
+- 2026-10-28: Git changes: a text document that differs from `HEAD` shows a changes toggle (also View > Show Changes and Cmd/Ctrl+Shift+D) that covers the body with gpui-kit's read-only unified diff, and the nearby-files picker marks changed files. Git runs as the `git` binary off the UI thread; no git, no repository, or a failure means no toggle and no markers. Details in [Git diff](git-diff.md).

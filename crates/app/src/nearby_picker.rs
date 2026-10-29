@@ -9,13 +9,16 @@ use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::{Disableable as _, Icon, IndexPath, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-  AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, Hsla, IntoElement, Render, Window, div, px,
+  AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, Hsla, IntoElement, Render, SharedString, Window,
+  div, px,
 };
 use openit_core::browse::{self, Entry, Ranked};
+use openit_core::git;
 use openit_core::kind::DocumentKind;
 
 use crate::status_pickers::{overlay_frame, select_row_in_view};
 use crate::theme::{ActivePalette, hsla};
+use crate::title_bar::tooltip;
 use crate::window::replace_document;
 
 const PLACEHOLDER: &str = "Go to File";
@@ -39,6 +42,12 @@ enum BrowseOutcome {
   Failed(String),
 }
 
+/// Files with uncommitted git changes in one directory, as git answered.
+struct DirChanges {
+  dir: PathBuf,
+  names: HashSet<String>,
+}
+
 /// Fuzzy file palette rooted at one directory.
 pub struct NearbyPicker {
   state: Entity<CommandState>,
@@ -55,6 +64,10 @@ pub struct NearbyPicker {
   pending_selection: Option<usize>,
   /// Row of a Return that arrived before its listing did.
   pending_confirm: Option<usize>,
+  /// The directory whose git changes were last asked for; one query per directory.
+  changes_asked: Option<PathBuf>,
+  /// The answer for `changes_asked`, once git has given it.
+  changes: Option<DirChanges>,
 }
 
 impl EventEmitter<NearbyPickerEvent> for NearbyPicker {}
@@ -84,6 +97,8 @@ impl NearbyPicker {
       preselected: false,
       pending_selection: None,
       pending_confirm: None,
+      changes_asked: None,
+      changes: None,
     };
     picker.schedule(false, cx);
     picker
@@ -144,11 +159,49 @@ impl NearbyPicker {
               .position(|ranked| !ranked.entry.is_dir && ranked.entry.name == current)
           });
         }
+        self.ask_changes(&dir, cx);
         Listing::Rows { dir, items }
       },
       BrowseOutcome::Failed(message) => Listing::Failed { message },
     };
     cx.notify();
+  }
+
+  /// Ask git which files in `dir` have uncommitted changes, off the UI thread.
+  /// Rows show at once; their markers arrive with the answer.
+  fn ask_changes(&mut self, dir: &Path, cx: &Context<Self>) {
+    if self.changes_asked.as_deref() == Some(dir) {
+      return;
+    }
+    self.changes_asked = Some(dir.to_path_buf());
+    let dir = dir.to_path_buf();
+    cx.spawn(async move |this, cx| {
+      let names = cx
+        .background_spawn({
+          let dir = dir.clone();
+          async move { git::changed_files(&dir) }
+        })
+        .await;
+      let _ = this.update(cx, |this, cx| {
+        if this.changes_asked.as_ref() == Some(&dir) {
+          this.changes = Some(DirChanges { dir, names });
+          cx.notify();
+        }
+      });
+    })
+    .detach();
+  }
+
+  /// Names of the changed files in the listed directory, once git answered for it.
+  fn listed_changes(&self) -> Option<&HashSet<String>> {
+    let Listing::Rows { dir, .. } = &self.listing else {
+      return None;
+    };
+    self
+      .changes
+      .as_ref()
+      .filter(|changes| changes.dir == *dir)
+      .map(|changes| &changes.names)
   }
 
   /// Return pressed on `index`. While the listing still belongs to an earlier query (the search
@@ -225,20 +278,28 @@ fn browse_outcome(dir: &Path, needle: &str) -> BrowseOutcome {
   }
 }
 
-fn command_items(listing: &Listing, current_file: Option<&str>) -> Vec<CommandItem> {
+fn command_items(listing: &Listing, current_file: Option<&str>, changed: Option<&HashSet<String>>) -> Vec<CommandItem> {
   match listing {
     Listing::Pending => Vec::new(),
-    Listing::Rows { items, .. } => items.iter().map(|ranked| command_item(ranked, current_file)).collect(),
+    Listing::Rows { items, .. } => items
+      .iter()
+      .map(|ranked| {
+        let has_changes = !ranked.entry.is_dir && changed.is_some_and(|names| names.contains(&ranked.entry.name));
+        command_item(ranked, current_file, has_changes)
+      })
+      .collect(),
     Listing::Failed { message } => vec![CommandItem::new().label(message.clone()).disabled(true)],
   }
 }
 
-fn command_item(ranked: &Ranked, current_file: Option<&str>) -> CommandItem {
+fn command_item(ranked: &Ranked, current_file: Option<&str>, has_changes: bool) -> CommandItem {
   let ranked = ranked.clone();
   let current = !ranked.entry.is_dir && current_file == Some(ranked.entry.name.as_str());
   CommandItem::new().child(move |_, cx| {
-    let muted = hsla(cx.global::<ActivePalette>().0.muted_foreground);
-    highlighted_row(&ranked, current, muted)
+    let palette = cx.global::<ActivePalette>().0;
+    let muted = hsla(palette.muted_foreground);
+    let changes = has_changes.then(|| hsla(palette.git_modified));
+    highlighted_row(&ranked, current, changes, muted)
   })
 }
 
@@ -256,7 +317,8 @@ const fn row_icon(entry: &Entry) -> &'static str {
   }
 }
 
-fn highlighted_row(ranked: &Ranked, current: bool, muted: Hsla) -> AnyElement {
+/// One picker row. `changes` carries the marker color when the file has uncommitted git changes.
+fn highlighted_row(ranked: &Ranked, current: bool, changes: Option<Hsla>, muted: Hsla) -> AnyElement {
   let matched: HashSet<u32> = ranked.positions.iter().copied().collect();
   let mut runs: Vec<(String, bool)> = Vec::new();
   for (index, ch) in ranked.entry.name.chars().enumerate() {
@@ -288,6 +350,15 @@ fn highlighted_row(ranked: &Ranked, current: bool, muted: Hsla) -> AnyElement {
       ),
     )
     .when(current, |row| row.child(div().text_color(muted).child("(current)")))
+    .when_some(changes, |row, color| {
+      row.child(div().flex_1()).child(
+        div()
+          .id(SharedString::new(format!("changes-{}", ranked.entry.name)))
+          .flex()
+          .tooltip(|window, cx| tooltip("Uncommitted changes".into(), None, window, cx))
+          .child(Icon::empty().path("icons/file-diff.svg").small().text_color(color)),
+      )
+    })
     .into_any_element()
 }
 
@@ -312,7 +383,7 @@ impl Render for NearbyPicker {
     let this = cx.entity().downgrade();
     let prefix = format_prefix(&self.prefix_dir);
     let muted = hsla(palette.muted_foreground);
-    let items = command_items(&self.listing, self.current_file.as_deref());
+    let items = command_items(&self.listing, self.current_file.as_deref(), self.listed_changes());
     let on_query = this.clone();
     let on_confirm = this.clone();
     let on_cancel = this;
@@ -361,6 +432,19 @@ impl NearbyPicker {
       Listing::Rows { items, .. } => items.iter().map(Ranked::display_name).collect(),
       Listing::Failed { message } => vec![message.clone()],
     }
+  }
+
+  /// Rows that carry the uncommitted-changes marker, by display name.
+  fn marked_rows(&self) -> Vec<String> {
+    let Listing::Rows { items, .. } = &self.listing else {
+      return Vec::new();
+    };
+    let changed = self.listed_changes();
+    items
+      .iter()
+      .filter(|ranked| !ranked.entry.is_dir && changed.is_some_and(|names| names.contains(&ranked.entry.name)))
+      .map(Ranked::display_name)
+      .collect()
   }
 
   fn type_query(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -493,5 +577,35 @@ mod tests {
       restored.iter().any(|name| name == "folder/" || name == "sibling.md"),
       "typing ../ restores a listing, got {restored:?}"
     );
+  }
+
+  #[gpui_kit::test]
+  fn a_changed_file_row_carries_the_marker(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("docs")).unwrap();
+    openit_core::git::test_support::commit(
+      dir.path(),
+      &[("changed.md", "one\n"), ("clean.md", "one\n"), ("docs/inner.md", "one\n")],
+    )
+    .unwrap();
+    fs::write(dir.path().join("changed.md"), "two\n").unwrap();
+    fs::write(dir.path().join("docs/inner.md"), "two\n").unwrap();
+
+    let (picker, cx) = open_picker(cx, &dir.path().join("clean.md"));
+
+    assert_eq!(
+      picker.read_with(cx, |picker, _| picker.row_names()),
+      ["docs/", "changed.md", "clean.md"]
+    );
+    assert_eq!(picker.read_with(cx, |picker, _| picker.marked_rows()), ["changed.md"]);
+  }
+
+  #[gpui_kit::test]
+  fn a_directory_outside_any_repository_marks_nothing(cx: &mut TestAppContext) {
+    let (_keep, _folder, notes) = markdown_tree();
+    let (picker, cx) = open_picker(cx, &notes);
+
+    assert_eq!(picker.read_with(cx, |picker, _| picker.row_names()), ["sub/", "notes.md"]);
+    assert_eq!(picker.read_with(cx, |picker, _| picker.marked_rows()), Vec::<String>::new());
   }
 }
