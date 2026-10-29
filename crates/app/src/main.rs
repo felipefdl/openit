@@ -429,6 +429,12 @@ fn handle_set_markdown_preview_width(action: &actions::SetMarkdownPreviewWidth, 
   SettingsStore::update(cx, |settings| settings.markdown_preview_width = width);
 }
 
+/// Select how the uncommitted-changes view lays out the two versions.
+fn handle_set_diff_layout(action: &actions::SetDiffLayout, cx: &mut App) {
+  let layout = action.layout;
+  SettingsStore::update(cx, |settings| settings.diff_layout = layout);
+}
+
 /// Show the file picker and open every chosen file in its own window.
 #[allow(
   clippy::needless_pass_by_ref_mut,
@@ -754,6 +760,7 @@ fn attach_app_handlers(cx: &mut App) {
   install_last_window_quit(cx);
   cx.on_action(|action: &actions::SetThemeMode, cx| handle_set_theme_mode(action, cx));
   cx.on_action(|action: &actions::SetMarkdownPreviewWidth, cx| handle_set_markdown_preview_width(action, cx));
+  cx.on_action(|action: &actions::SetDiffLayout, cx| handle_set_diff_layout(action, cx));
   cx.on_action(|_: &actions::ToggleAlwaysShowStatusBar, cx| handle_toggle_always_show_status_bar(cx));
   cx.on_action(|_: &actions::OpenFile, cx| handle_open_file(cx));
   cx.on_action(|_: &actions::NewFromClipboard, cx| handle_new_from_clipboard(cx));

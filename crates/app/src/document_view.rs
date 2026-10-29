@@ -41,7 +41,7 @@ use openit_core::resource::DomainFamily;
 use openit_core::schema::{self, JsonFamily};
 use openit_core::select::SchemaSelection;
 use openit_core::session::SessionId;
-use openit_core::settings::{MarkdownMode, MarkdownPreviewWidth};
+use openit_core::settings::{DiffLayout, MarkdownMode, MarkdownPreviewWidth};
 use openit_core::text_find;
 use openit_core::watch::Fingerprint;
 use ropey::Rope;
@@ -65,12 +65,20 @@ const READABLE_PREVIEW_WIDTH: f32 = 700.;
 const WIDE_PREVIEW_WIDTH: f32 = 960.;
 /// Trailing space so the last preview line clears the window edge.
 const PREVIEW_SPACER: &str = "\n\n<br>\n";
-/// Window width from which the changes show the two versions side by side.
+/// Window width from which the automatic layout shows the two versions side by side.
 const SIDE_BY_SIDE_WIDTH: f32 = 1100.;
 
-/// The changes layout for the window's current width.
-fn diff_mode_for(window: &Window) -> DiffMode {
-  if window.viewport_size().width >= gpui_kit::px(SIDE_BY_SIDE_WIDTH) {
+/// The changes layout for the chosen setting and the window's current width.
+fn diff_mode_for(window: &Window, cx: &App) -> DiffMode {
+  let layout = cx
+    .try_global::<AppSettings>()
+    .map_or_else(DiffLayout::default, |settings| settings.0.diff_layout);
+  let side_by_side = match layout {
+    DiffLayout::SideBySide => true,
+    DiffLayout::Inline => false,
+    DiffLayout::Auto => window.viewport_size().width >= gpui_kit::px(SIDE_BY_SIDE_WIDTH),
+  };
+  if side_by_side {
     DiffMode::Split
   } else {
     DiffMode::Unified
@@ -343,6 +351,7 @@ impl DocumentView {
       if this.json_family().is_some() {
         this.start_schema_validation(window, cx);
       }
+      this.match_diff_layout(window, cx);
       cx.notify();
     }));
     view.settings_store_observation = Some(cx.observe_global::<SettingsStore>(|_, cx| cx.notify()));
@@ -691,11 +700,16 @@ impl DocumentView {
       }
     }));
     self.bounds_observation = Some(cx.observe_window_bounds(window, |this, window, cx| {
-      if let Some(changes) = &this.changes {
-        changes.state.update(cx, |state, cx| state.set_mode(diff_mode_for(window), cx));
-      }
+      this.match_diff_layout(window, cx);
     }));
     self.refresh_changes(cx);
+  }
+  /// Lay the changes out for the chosen setting and the window's current width.
+  fn match_diff_layout(&self, window: &Window, cx: &mut Context<Self>) {
+    if let Some(changes) = &self.changes {
+      let mode = diff_mode_for(window, cx);
+      changes.state.update(cx, |state, cx| state.set_mode(mode, cx));
+    }
   }
   /// Ask git for the file's changes against `HEAD`, off the UI thread. Documents
   /// without a path, and documents another view hosts, have none.
@@ -756,7 +770,7 @@ impl DocumentView {
       changes.patch = report;
       changes.language = language;
     } else {
-      let mode = diff_mode_for(window);
+      let mode = diff_mode_for(window, cx);
       let state = cx.new(|cx| DiffState::new([file], cx).with_mode(mode));
       self.changes = Some(Changes {
         patch: report,
@@ -6078,6 +6092,36 @@ pub(crate) mod tests {
         "the editor must not take the picker's keyboard"
       );
     });
+  }
+
+  #[gpui_kit::test]
+  fn the_changes_layout_setting_overrides_the_window_width(cx: &mut TestAppContext) {
+    use gpui_kit::component::diff::DiffMode;
+    use openit_core::settings::DiffLayout;
+
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+    let diff_mode =
+      |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.changes.as_ref().unwrap().state.read(cx).mode());
+    let set_layout = |layout: DiffLayout, cx: &mut VisualTestContext| {
+      cx.update(|_, cx| cx.update_global::<AppSettings, _>(|settings, _| settings.0.diff_layout = layout));
+      cx.run_until_parked();
+    };
+
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(1400.), gpui_kit::px(800.)));
+    cx.run_until_parked();
+    set_layout(DiffLayout::Inline, cx);
+    assert_eq!(diff_mode(cx), DiffMode::Unified, "inline holds on a wide window");
+
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(800.)));
+    cx.run_until_parked();
+    set_layout(DiffLayout::SideBySide, cx);
+    assert_eq!(diff_mode(cx), DiffMode::Split, "side by side holds on a narrow window");
+
+    set_layout(DiffLayout::Auto, cx);
+    assert_eq!(diff_mode(cx), DiffMode::Unified, "automatic follows the narrow window");
   }
 
   #[gpui_kit::test]

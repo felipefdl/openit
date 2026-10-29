@@ -5,7 +5,7 @@
 )]
 
 use gpui_kit::{Action, actions};
-use openit_core::settings::{MarkdownPreviewWidth, ThemeMode};
+use openit_core::settings::{DiffLayout, MarkdownPreviewWidth, ThemeMode};
 use serde::Serialize;
 
 /// Select the appearance mode used by the application.
@@ -18,6 +18,13 @@ pub struct SetThemeMode(pub ThemeMode);
 #[action(namespace = openit, no_json)]
 pub struct SetMarkdownPreviewWidth {
   pub width: MarkdownPreviewWidth,
+}
+
+/// Select how the uncommitted-changes view lays out the two versions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Action)]
+#[action(namespace = openit, no_json)]
+pub struct SetDiffLayout {
+  pub layout: DiffLayout,
 }
 
 /// Select what fills the space behind an image.

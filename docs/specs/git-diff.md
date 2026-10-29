@@ -21,7 +21,7 @@ A text file with uncommitted git changes shows what changed without leaving Open
 - The diff reflects the saved file, not unsaved buffer text: keeps the patch git's own, with no blob reading or diff crate.
 - `git` CLI over `gix`: no dependency tree added; the patch is exactly what `DiffFile::parse` reads.
 - Git missing, no repository, or a git failure means no changes: `tracing::debug!`, no button, no icon, no user-facing error.
-- Layout follows the window: side by side (`DiffMode::Split`) at 1100 px wide or more, one column below, switching live on resize; no setting and no menu item.
+- Layout is a View > Diff Layout choice: Automatic (side by side at 1100 px wide or more, inline below, switching live on resize), Side by Side, or Inline; app-wide and persisted as `diff_layout`, like the Markdown preview width.
 - The diff toggles over the current mode and returns to it; it is never the opening mode and never touches `markdown_mode`.
 - Picker icons are markers only; picking a row opens the file as before.
 
@@ -70,6 +70,15 @@ Decide alone: the marker and button icons, tooltip wording, test placement, log 
   - tests: a window 1100 px wide or more shows `DiffMode::Split`, a narrower one `DiffMode::Unified`, and a resize across the line switches it
   - VM run: a wide window shows the two versions side by side; narrowing it returns to one column
 
+### 5. Diff Layout menu
+
+- After: 4
+- View > Diff Layout submenu with Automatic, Side by Side, and Inline, checked from settings; a pick applies to every open diff at once.
+- Done when:
+  - `just check`: green
+  - tests: Inline holds on a wide window, Side by Side holds on a narrow one, Automatic follows the width; the setting round-trips through the settings file
+  - VM run: each menu choice switches an open diff
+
 ---
 
 ## History
@@ -93,3 +102,7 @@ Decide alone: the marker and button icons, tooltip wording, test placement, log 
 | 2026-10-28 | 2 | Completed | Merged into main |
 | 2026-10-28 | 3 | Completed | Merged into main |
 | 2026-10-28 | 4 | Completed | Merged into main |
+| 2026-10-28 | - | Updated | Layout becomes a View menu choice (Automatic, Side by Side, Inline); item 5 added. |
+| 2026-10-28 | 5 | Dispatched | Inline on main, start 29d0352 |
+| 2026-10-28 | 5 | Executor decided | `diff_layout` is an app-wide persisted setting mirroring `markdown_preview_width`, since menu checkmarks come from Settings; the submenu is named Diff Layout. |
+| 2026-10-28 | 5 | Completed | Committed on main |

@@ -1,12 +1,13 @@
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 use gpui_kit::{App, BorrowAppContext as _, Menu, MenuItem, OsAction};
-use openit_core::settings::{MarkdownPreviewWidth, Settings, ThemeMode};
+use openit_core::settings::{DiffLayout, MarkdownPreviewWidth, Settings, ThemeMode};
 
 use crate::actions::{
   ActualSize, CheckForUpdates, CloseWindow, CodeFont, ColorTheme, ConvertToMarkdown, CycleBackground, Export, Find,
   FlipHorizontal, FlipVertical, GoToFile, GoToPage, InstallCommandLineTools, NewFromClipboard, OpenFile, PdfPages,
-  Quit, RotateLeft, RotateRight, Save, SelectNextOccurrence, SetImageBackground, SetMarkdownPreviewWidth, SetThemeMode,
-  ShowChanges, ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut, ZoomToFit,
+  Quit, RotateLeft, RotateRight, Save, SelectNextOccurrence, SetDiffLayout, SetImageBackground,
+  SetMarkdownPreviewWidth, SetThemeMode, ShowChanges, ToggleAlwaysShowStatusBar, ToggleMode, UiFont, ZoomIn, ZoomOut,
+  ZoomToFit,
 };
 use crate::image_view::ImageBackground;
 
@@ -26,6 +27,14 @@ fn build_with_background(settings: &Settings, current_background: Option<ImageBa
       .checked(settings.markdown_preview_width == MarkdownPreviewWidth::Wide),
     MenuItem::action("Full Width", SetMarkdownPreviewWidth { width: MarkdownPreviewWidth::FullWidth })
       .checked(settings.markdown_preview_width == MarkdownPreviewWidth::FullWidth),
+  ]);
+  let diff_layout = Menu::new("Diff Layout").items([
+    MenuItem::action("Automatic", SetDiffLayout { layout: DiffLayout::Auto })
+      .checked(settings.diff_layout == DiffLayout::Auto),
+    MenuItem::action("Side by Side", SetDiffLayout { layout: DiffLayout::SideBySide })
+      .checked(settings.diff_layout == DiffLayout::SideBySide),
+    MenuItem::action("Inline", SetDiffLayout { layout: DiffLayout::Inline })
+      .checked(settings.diff_layout == DiffLayout::Inline),
   ]);
   let appearance = Menu::new("Appearance").items([
     MenuItem::action("System", SetThemeMode(ThemeMode::System)).checked(mode == ThemeMode::System),
@@ -82,6 +91,7 @@ fn build_with_background(settings: &Settings, current_background: Option<ImageBa
     Menu::new("View").items([
       MenuItem::action("Toggle Preview / Edit", ToggleMode),
       MenuItem::action("Show Changes", ShowChanges),
+      MenuItem::submenu(diff_layout),
       MenuItem::action("Always Show Status Bar", ToggleAlwaysShowStatusBar).checked(settings.always_show_status_bar),
       MenuItem::submenu(preview_width),
       MenuItem::separator(),

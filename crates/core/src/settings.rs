@@ -86,6 +86,19 @@ pub enum MarkdownMode {
   Edit,
 }
 
+/// How the uncommitted-changes view lays out the two versions of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffLayout {
+  /// Side by side on wide windows, inline on narrow ones.
+  #[default]
+  Auto,
+  /// The original and the changed version in two columns.
+  SideBySide,
+  /// One column, removed lines above added ones.
+  Inline,
+}
+
 /// Largest settings file accepted by the configuration loader.
 pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 
@@ -122,6 +135,9 @@ pub struct Settings {
   /// Mode used when opening Markdown documents.
   #[serde(default)]
   pub markdown_mode: MarkdownMode,
+  /// Layout of the uncommitted-changes view.
+  #[serde(default)]
+  pub diff_layout: DiffLayout,
   /// Manual schema picks keyed by the document's canonical path.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub schemas: BTreeMap<String, String>,
@@ -147,6 +163,7 @@ impl Default for Settings {
       always_show_status_bar: false,
       markdown_preview_width: MarkdownPreviewWidth::default(),
       markdown_mode: MarkdownMode::default(),
+      diff_layout: DiffLayout::default(),
       schemas: BTreeMap::new(),
     }
   }
@@ -235,7 +252,7 @@ impl Settings {
 mod tests {
   use std::fs;
 
-  use super::{Error, FontSettings, MAX_SETTINGS_BYTES, MarkdownMode, MarkdownPreviewWidth, Settings};
+  use super::{DiffLayout, Error, FontSettings, MAX_SETTINGS_BYTES, MarkdownMode, MarkdownPreviewWidth, Settings};
 
   #[test]
   fn missing_file_is_the_default() {
@@ -305,6 +322,7 @@ mod tests {
     let settings = Settings {
       markdown_preview_width: MarkdownPreviewWidth::Wide,
       markdown_mode: MarkdownMode::Edit,
+      diff_layout: DiffLayout::SideBySide,
       ..Settings::default()
     };
 
