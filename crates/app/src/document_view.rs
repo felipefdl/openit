@@ -20,7 +20,7 @@ use crate::theme::{ActivePalette, hsla, observe_appearance};
 use crate::theme_picker::{ThemePicker, ThemePickerEvent};
 use crate::title_bar::{file_name, toolbar_button, tooltip};
 use crate::updater::dialog::{UpdateEvent, UpdateView};
-use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
+use gpui_kit::component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, RopeExt, TabSize};
 use gpui_kit::component::text::{
@@ -65,6 +65,17 @@ const READABLE_PREVIEW_WIDTH: f32 = 700.;
 const WIDE_PREVIEW_WIDTH: f32 = 960.;
 /// Trailing space so the last preview line clears the window edge.
 const PREVIEW_SPACER: &str = "\n\n<br>\n";
+/// Window width from which the changes show the two versions side by side.
+const SIDE_BY_SIDE_WIDTH: f32 = 1100.;
+
+/// The changes layout for the window's current width.
+fn diff_mode_for(window: &Window) -> DiffMode {
+  if window.viewport_size().width >= gpui_kit::px(SIDE_BY_SIDE_WIDTH) {
+    DiffMode::Split
+  } else {
+    DiffMode::Unified
+  }
+}
 
 fn markdown_preview_width(width: MarkdownPreviewWidth, viewport: gpui_kit::Pixels) -> gpui_kit::Pixels {
   let available = (viewport - gpui_kit::px(MIN_PREVIEW_SIDE_PADDING * 2.)).max(gpui_kit::px(0.));
@@ -241,6 +252,7 @@ pub struct DocumentView {
   changes: Option<Changes>,
   changes_task: Option<Task<()>>,
   activation_observation: Option<Subscription>,
+  bounds_observation: Option<Subscription>,
 }
 impl DocumentView {
   pub fn open(path: PathBuf, loaded: Loaded, session: SessionId, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -303,6 +315,7 @@ impl DocumentView {
       changes: None,
       changes_task: None,
       activation_observation: None,
+      bounds_observation: None,
     };
     view.session.saved_text = view.initial_text.clone();
     view.requests_observation = Some(cx.observe_in(&requests, window, |this, requests, window, cx| {
@@ -332,13 +345,7 @@ impl DocumentView {
     }));
     view.settings_store_observation = Some(cx.observe_global::<SettingsStore>(|_, cx| cx.notify()));
     view.session.start_watch(window, cx);
-    // A commit made elsewhere leaves the file untouched, so a window coming back to the front asks again.
-    view.activation_observation = Some(cx.observe_window_activation(window, |this, window, cx| {
-      if window.is_window_active() {
-        this.refresh_changes(cx);
-      }
-    }));
-    view.refresh_changes(cx);
+    view.start_changes(window, cx);
     if view.mode == Mode::Preview {
       window.focus(&view.focus, cx);
     } else {
@@ -672,6 +679,22 @@ impl DocumentView {
     self.session.on_disk_change(window, cx);
     self.refresh_changes(cx);
   }
+  /// Follow the file's git changes: ask now, ask again whenever the window comes
+  /// back to the front (a commit made elsewhere leaves the file untouched), and
+  /// keep the diff's layout matched to the window width.
+  fn start_changes(&mut self, window: &mut Window, cx: &Context<Self>) {
+    self.activation_observation = Some(cx.observe_window_activation(window, |this, window, cx| {
+      if window.is_window_active() {
+        this.refresh_changes(cx);
+      }
+    }));
+    self.bounds_observation = Some(cx.observe_window_bounds(window, |this, window, cx| {
+      if let Some(changes) = &this.changes {
+        changes.state.update(cx, |state, cx| state.set_mode(diff_mode_for(window), cx));
+      }
+    }));
+    self.refresh_changes(cx);
+  }
   /// Ask git for the file's changes against `HEAD`, off the UI thread. Documents
   /// without a path, and documents another view hosts, have none.
   pub(crate) fn refresh_changes(&mut self, cx: &Context<Self>) {
@@ -723,7 +746,8 @@ impl DocumentView {
       changes.state.update(cx, |state, cx| state.set_files([file], cx));
       changes.patch = report;
     } else {
-      let state = cx.new(|cx| DiffState::new([file], cx));
+      let mode = diff_mode_for(window);
+      let state = cx.new(|cx| DiffState::new([file], cx).with_mode(mode));
       self.changes = Some(Changes { patch: report, state, showing: false });
     }
     cx.notify();
@@ -1846,7 +1870,8 @@ impl DocumentView {
       return div()
         .flex_1()
         .min_h_0()
-        .child(Diff::new(&changes.state).header_visible(false).size_full())
+        // Prose files carry whole paragraphs on one line; wrapping keeps them readable without a horizontal scroll.
+        .child(Diff::new(&changes.state).header_visible(false).soft_wrap(true).size_full())
         .into_any_element();
     }
     match self.mode {
@@ -5982,6 +6007,30 @@ pub(crate) mod tests {
       assert!(!view.showing_changes());
       assert_eq!(view.mode(), Mode::Edit);
     });
+  }
+
+  #[gpui_kit::test]
+  fn the_changes_go_side_by_side_on_a_wide_window(cx: &mut TestAppContext) {
+    use gpui_kit::component::diff::DiffMode;
+
+    cx.update(gpui_kit::init);
+    let (_settings, _store) = install_globals(cx);
+    let repo = tempfile::tempdir().unwrap();
+    let (view, cx) = open_from_repository(cx, repo.path(), "notes.txt", "one\n", "two\n");
+    let diff_mode =
+      |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.changes.as_ref().unwrap().state.read(cx).mode());
+
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(1400.), gpui_kit::px(800.)));
+    cx.run_until_parked();
+    assert_eq!(diff_mode(cx), DiffMode::Split);
+
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(1099.), gpui_kit::px(800.)));
+    cx.run_until_parked();
+    assert_eq!(diff_mode(cx), DiffMode::Unified);
+
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(1100.), gpui_kit::px(800.)));
+    cx.run_until_parked();
+    assert_eq!(diff_mode(cx), DiffMode::Split);
   }
   #[cfg(test)]
   impl DocumentView {
