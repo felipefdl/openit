@@ -10,6 +10,7 @@ pub mod cache;
 pub mod catalog;
 pub mod document;
 pub mod error;
+pub mod git;
 pub mod handoff;
 pub mod ipc;
 pub mod kind;
