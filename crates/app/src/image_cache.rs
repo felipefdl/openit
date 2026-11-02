@@ -2,9 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use futures::{FutureExt as _, future::Shared};
 use gpui_kit::{
@@ -115,27 +115,18 @@ impl PermissionRequests {
   }
 }
 
-/// A placeholder kind retained for resources that are intentionally not rasterized.
-pub enum PlaceholderKind {
-  /// The resource was denied by the resolver or permission policy.
-  Denied(DenyReason),
-
-  /// SVG rendering is disabled for document resources.
-  Svg,
-}
-
 /// One document image-cache entry.
 pub enum Entry {
   /// A local or remote image is being read and decoded.
   Loading(Shared<Task<Result<LoadResult, ImageCacheError>>>),
-  /// A decoded raster image.
+  /// A decoded image.
   Ready(Arc<RenderImage>),
   /// The resource failed to read or decode; it renders the shared placeholder.
   Failed,
   /// The resource is waiting for permission from this family.
   AwaitingPermission(DomainFamily),
-  /// The resource renders a shared placeholder.
-  Placeholder(PlaceholderKind),
+  /// The resolver or permission policy refused the resource; it renders the shared placeholder.
+  Denied(DenyReason),
 }
 #[derive(Clone)]
 pub(crate) enum LoadResult {
@@ -155,7 +146,6 @@ pub struct DocumentImageCache {
   resources: HashMap<u64, Resource>,
   notifications: HashMap<u64, Task<()>>,
   placeholder: Option<Arc<RenderImage>>,
-  placeholder_slot: Arc<OnceLock<Arc<RenderImage>>>,
   ready: ReadyBudget,
 }
 impl DocumentImageCache {
@@ -174,7 +164,6 @@ impl DocumentImageCache {
       resources: HashMap::new(),
       notifications: HashMap::new(),
       placeholder: None,
-      placeholder_slot: Arc::new(OnceLock::new()),
       ready: ReadyBudget::default(),
     })
   }
@@ -266,30 +255,18 @@ impl DocumentImageCache {
         self.ready.touch(resource_hash);
         return Some(Ok(image));
       },
-      // A failed image shows the same placeholder as a denied one, not an empty gap.
+      // Failed and denied images show the shared placeholder, not an empty gap.
       Some(Entry::Failed) => return Some(Ok(self.placeholder_image())),
-      Some(Entry::AwaitingPermission(_)) | None => return None,
-      Some(Entry::Placeholder(kind)) => {
-        match kind {
-          PlaceholderKind::Denied(reason) => {
-            let _ = reason;
-          },
-          PlaceholderKind::Svg => {},
-        }
-        return self.placeholder.clone().map(Ok);
+      Some(Entry::Denied(reason)) => {
+        tracing::trace!(%reason, "document image denied");
+        return Some(Ok(self.placeholder_image()));
       },
+      Some(Entry::AwaitingPermission(_)) | None => return None,
     }?;
     match result {
       Ok(LoadResult::CacheMiss(resolved)) => self.apply_decision(resource_hash, resolved, window, cx),
       Ok(LoadResult::Image(image)) => {
-        let placeholder = self.placeholder.clone().or_else(|| self.placeholder_slot.get().cloned());
-        let is_svg = placeholder.as_ref().is_some_and(|placeholder| Arc::ptr_eq(placeholder, &image));
-        if is_svg {
-          self.placeholder = placeholder;
-          self.entries.insert(resource_hash, Entry::Placeholder(PlaceholderKind::Svg));
-        } else {
-          self.insert_ready(resource_hash, image.clone(), cx);
-        }
+        self.insert_ready(resource_hash, image.clone(), cx);
         Some(Ok(image))
       },
       Err(error) => {
@@ -334,14 +311,13 @@ impl DocumentImageCache {
       return;
     };
     let cache = cx.try_global::<ResourceCacheHandle>().map(|cache| Arc::clone(&cache.0));
-    let placeholder_slot = Arc::clone(&self.placeholder_slot);
     let task = cx
       .background_spawn(async move {
         let Some(cache) = cache else {
           return Ok(LoadResult::CacheMiss(Resolved::Remote(url)));
         };
         match cache.get(&url) {
-          Ok(Some(bytes)) => match decode_bytes(&bytes, &placeholder_slot) {
+          Ok(Some(bytes)) => match decode_bytes(&bytes, None) {
             Ok(image) => Ok(LoadResult::Image(image)),
             Err(error) => {
               if let Err(remove_error) = cache.remove(&url) {
@@ -371,10 +347,7 @@ impl DocumentImageCache {
     cx: &App,
   ) {
     let task = match resolved {
-      Resolved::Local(path) => {
-        let placeholder_slot = Arc::clone(&self.placeholder_slot);
-        cx.background_spawn(async move { decode_local(&path, &placeholder_slot).map(LoadResult::Image) })
-      },
+      Resolved::Local(path) => cx.background_spawn(async move { decode_local(&path).map(LoadResult::Image) }),
       Resolved::Remote(url) => {
         let Some(family) = family else {
           tracing::debug!(%url, "remote image URL has no host");
@@ -383,13 +356,12 @@ impl DocumentImageCache {
         };
         let fetcher = Arc::clone(&cx.global::<Fetcher>().0);
         let cache = cx.try_global::<ResourceCacheHandle>().map(|cache| Arc::clone(&cache.0));
-        let placeholder_slot = Arc::clone(&self.placeholder_slot);
         cx.background_spawn(async move {
           let bytes = fetcher
             .fetch(url.clone(), family)
             .await
             .map_err(|error| other_error(error.to_string()))?;
-          let image = decode_bytes(&bytes, &placeholder_slot)?;
+          let image = decode_bytes(&bytes, None)?;
           if let Some(cache) = cache
             && let Err(error) = cache.put(&url, &bytes)
           {
@@ -399,9 +371,7 @@ impl DocumentImageCache {
         })
       },
       Resolved::Denied(reason) => {
-        self
-          .entries
-          .insert(resource_hash, Entry::Placeholder(PlaceholderKind::Denied(reason)));
+        self.entries.insert(resource_hash, Entry::Denied(reason));
         return;
       },
     }
@@ -437,9 +407,7 @@ impl DocumentImageCache {
 
   fn insert_denied(&mut self, resource_hash: u64, reason: DenyReason) -> Arc<RenderImage> {
     let image = self.placeholder_image();
-    self
-      .entries
-      .insert(resource_hash, Entry::Placeholder(PlaceholderKind::Denied(reason)));
+    self.entries.insert(resource_hash, Entry::Denied(reason));
     image
   }
 
@@ -468,9 +436,7 @@ impl DocumentImageCache {
   }
 
   fn placeholder_image(&mut self) -> Arc<RenderImage> {
-    let image = self.placeholder_slot.get_or_init(make_placeholder).clone();
-    self.placeholder = Some(image.clone());
-    image
+    self.placeholder.get_or_insert_with(make_placeholder).clone()
   }
 
   pub(crate) fn release(&mut self, cx: &mut App) {
@@ -484,8 +450,7 @@ impl DocumentImageCache {
     self.ready = ReadyBudget::default();
     self.resources.clear();
     self.notifications.clear();
-    let placeholder = self.placeholder.take().or_else(|| self.placeholder_slot.get().cloned());
-    if let Some(image) = placeholder {
+    if let Some(image) = self.placeholder.take() {
       cx.drop_image(image, None);
       #[cfg(test)]
       RELEASED_IMAGE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -527,21 +492,15 @@ impl ImageCache for DocumentImageCache {
   }
 }
 
-fn decode_local(
-  path: &Path,
-  placeholder_slot: &Arc<OnceLock<Arc<RenderImage>>>,
-) -> Result<Arc<RenderImage>, ImageCacheError> {
+fn decode_local(path: &Path) -> Result<Arc<RenderImage>, ImageCacheError> {
   let bytes = read_local(path)?;
-  decode_bytes(&bytes, placeholder_slot)
+  decode_bytes(&bytes, path.parent())
 }
 
-fn decode_bytes(
-  bytes: &[u8],
-  placeholder_slot: &Arc<OnceLock<Arc<RenderImage>>>,
-) -> Result<Arc<RenderImage>, ImageCacheError> {
-  match image_decode::decode(bytes) {
+/// Decode one image; an SVG may read files under `svg_dir` only.
+fn decode_bytes(bytes: &[u8], svg_dir: Option<&Path>) -> Result<Arc<RenderImage>, ImageCacheError> {
+  match image_decode::decode(bytes, svg_dir) {
     Decoded::Raster(image) => Ok(image),
-    Decoded::Svg => Ok(placeholder_slot.get_or_init(make_placeholder).clone()),
     Decoded::Unsupported => Err(other_error("unsupported image")),
   }
 }

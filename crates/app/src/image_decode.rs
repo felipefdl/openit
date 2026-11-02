@@ -3,6 +3,7 @@
 //! cap and the allocation limits below.
 
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui_kit::RenderImage;
@@ -23,18 +24,26 @@ const MAX_ANIMATION_PIXELS: u64 = 64 * 1024 * 1024;
 
 /// Result of decoding one document image.
 pub enum Decoded {
-  /// A raster image with one frame for still images or multiple frames for animations.
+  /// A drawable image: one frame for still images and SVG, several for animations.
   Raster(Arc<RenderImage>),
-  /// SVG bytes recognized but not rasterized.
-  Svg,
   /// Bytes that are not a supported image or could not be decoded.
   Unsupported,
 }
 
 /// Sniff and decode supported document image bytes.
-pub fn decode(bytes: &[u8]) -> Decoded {
-  if is_svg(bytes) {
-    return Decoded::Svg;
+///
+/// SVG is rasterized at its intrinsic size, so it lays out like a raster of
+/// that size. `svg_dir` bounds the files an SVG may reference; `None` lets it
+/// read none, which is what a remote SVG gets.
+pub fn decode(bytes: &[u8], svg_dir: Option<&Path>) -> Decoded {
+  if looks_like_svg(bytes) {
+    return match crate::svg::decode_document(bytes, Transform::IDENTITY, svg_dir) {
+      Ok(document) => Decoded::Raster(document.render),
+      Err(error) => {
+        tracing::debug!(%error, "document SVG could not be drawn");
+        Decoded::Unsupported
+      },
+    };
   }
 
   let Ok(format) = image::guess_format(bytes) else {
@@ -238,13 +247,11 @@ fn allocation_limit_error() -> image::ImageError {
   ))
 }
 
-fn is_svg(bytes: &[u8]) -> bool {
-  let Some(first_non_whitespace) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
-    return false;
-  };
-  let bytes = bytes.get(first_non_whitespace..).unwrap_or_default();
+/// Markup, which no raster format starts with: SVG, or XML that fails to parse as SVG.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+  let bytes = bytes.trim_ascii_start();
   let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes).trim_ascii_start();
-  bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml")
+  bytes.starts_with(b"<")
 }
 
 #[cfg(test)]
@@ -313,7 +320,7 @@ mod tests {
 
   #[test]
   fn an_animation_keeps_frames_delays_and_bgra_pixels() {
-    let Decoded::Raster(image) = decode(&three_frame_gif()) else {
+    let Decoded::Raster(image) = decode(&three_frame_gif(), None) else {
       panic!("raster expected")
     };
     assert_eq!(image.frame_count(), 3);
@@ -326,7 +333,7 @@ mod tests {
   fn a_truncated_gif_is_unsupported() {
     let mut bytes = three_frame_gif();
     bytes.truncate(bytes.len() / 2);
-    assert!(matches!(decode(&bytes), Decoded::Unsupported));
+    assert!(matches!(decode(&bytes, None), Decoded::Unsupported));
   }
 
   #[test]
@@ -360,7 +367,7 @@ mod tests {
 
   #[test]
   fn a_small_png_decodes_to_one_bgra_frame() {
-    let Decoded::Raster(image) = decode(&png(4, 3)) else {
+    let Decoded::Raster(image) = decode(&png(4, 3), None) else {
       panic!("raster expected")
     };
     assert_eq!(
@@ -374,7 +381,7 @@ mod tests {
 
   #[test]
   fn an_oversized_png_is_downscaled_to_the_edge_limit() {
-    let Decoded::Raster(image) = decode(&png(MAX_IMAGE_EDGE * 2, 10)) else {
+    let Decoded::Raster(image) = decode(&png(MAX_IMAGE_EDGE * 2, 10), None) else {
       panic!("raster expected")
     };
     assert_eq!(
@@ -384,18 +391,30 @@ mod tests {
   }
 
   #[test]
-  fn svg_is_recognized_and_not_rendered() {
-    assert!(matches!(
-      decode(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"),
-      Decoded::Svg
-    ));
-    assert!(matches!(decode(b"\xef\xbb\xbf  <?xml version='1.0'?><svg/>"), Decoded::Svg));
+  fn svg_is_drawn_at_its_intrinsic_size() {
+    let svg = br##"<!-- exported --><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><rect width="8" height="4" fill="#e08030"/></svg>"##;
+    for bytes in [svg.to_vec(), [b"\xef\xbb\xbf  ".as_slice(), svg].concat()] {
+      let Decoded::Raster(image) = decode(&bytes, None) else {
+        panic!("SVG drawn")
+      };
+      assert_eq!(
+        image.size(0),
+        gpui_kit::size(gpui_kit::DevicePixels(8), gpui_kit::DevicePixels(4))
+      );
+      assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0x30, 0x80, 0xe0, 0xff]);
+    }
+  }
+
+  #[test]
+  fn markup_that_is_not_svg_is_unsupported() {
+    assert!(matches!(decode(b"<html><body/></html>", None), Decoded::Unsupported));
+    assert!(matches!(decode(b"<svg", None), Decoded::Unsupported));
   }
 
   #[test]
   fn garbage_is_unsupported() {
-    assert!(matches!(decode(b"not an image"), Decoded::Unsupported));
-    assert!(matches!(decode(&[]), Decoded::Unsupported));
+    assert!(matches!(decode(b"not an image", None), Decoded::Unsupported));
+    assert!(matches!(decode(&[], None), Decoded::Unsupported));
     assert_eq!(MAX_IMAGE_BYTES, 64 * 1024 * 1024);
   }
 
@@ -403,6 +422,6 @@ mod tests {
   fn a_truncated_png_is_unsupported_not_a_panic() {
     let mut bytes = png(64, 64);
     bytes.truncate(bytes.len() / 2);
-    assert!(matches!(decode(&bytes), Decoded::Unsupported));
+    assert!(matches!(decode(&bytes, None), Decoded::Unsupported));
   }
 }

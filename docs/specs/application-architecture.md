@@ -198,7 +198,7 @@ Faithful for text-heavy documents (papers, manuals, reports). Tables are best-ef
 #### Formats
 
 - Raster, decoded by the `image` crate: PNG (including APNG), JPEG, GIF, WebP, BMP, ICO and CUR, TIFF, TGA, PNM. GIF, WebP, and APNG animations play. EXIF orientation is applied on decode.
-- Vector: SVG rasterized by `resvg`, static subset only (no scripts, events, or animation). Fonts come from the system font database. `href` references resolve through the document resource resolver against the document's own directory; `data:` URLs embedded in the file are allowed; remote references render a placeholder for that element and the rest of the document still renders. Standalone SVG documents do not depend on GPUI's SVG renderer, so the Markdown-embedded SVG limitation does not apply to them.
+- Vector: SVG rasterized by `resvg`, static subset only (no scripts, events, or animation). Fonts come from the system font database. `href` references resolve through the document resource resolver against the document's own directory; `data:` URLs embedded in the file are allowed; remote references render a placeholder for that element and the rest of the document still renders. OpenIt owns this path and never uses GPUI's SVG renderer, whose default resolver reads any local file.
 - Every other type, including HEIC, AVIF, JPEG XL, JPEG 2000, PSD, OpenEXR, camera RAW, and GPU texture containers, is **not supported** and shows the unsupported-format explanation.
 
 #### Viewing
@@ -304,7 +304,7 @@ Images load through a per-document `ImageCache` installed as an ancestor of the 
 
 ### SVG
 
-SVG images from documents show a placeholder. The resolver security limitation and required upstream control are tracked in [Blocked features](../blocked-features.md).
+SVG images in documents rasterize through the same `resvg` path as standalone SVG documents, at their intrinsic size, so they lay out like a raster of that size. A local SVG may reference files in its own directory only. A remote or cached SVG may reference no local file. `data:` URLs are allowed, remote references are never fetched, and an SVG that fails to parse shows the failure placeholder.
 
 ### Schemas
 
@@ -390,7 +390,7 @@ Thresholds come from the first measured baseline, not from assumptions about Rus
 
 ## Prototype gates
 
-The feasibility checks and upstream limitations are tracked in [Blocked features](../blocked-features.md), including reading-position alignment, SVG resource control, next-occurrence selection, and the PDF engine's rendering gaps.
+The feasibility checks and upstream limitations are tracked in [Blocked features](../blocked-features.md), including reading-position alignment, next-occurrence selection, and the PDF engine's rendering gaps.
 
 ## Dependencies and licensing
 
@@ -444,3 +444,4 @@ OpenIt is Apache-2.0. gpui-kit, gpui-component, gpui-base, and gpui-pre are Apac
 - 2026-10-28: gpui-kit 0.8.1 (gpui-pre 0.3.10), jsonschema 0.60.2, uuid 1.29, interprocess 2.4.7, notify 8.2.1, and current dependencies; the duplicate wgpu 29, naga 29, taffy, and cocoa copies leave the tree. Scroll handling follows gpui's rename to `ScrollEvent`/`on_scroll`. resvg stays at 0.46 and ropey at 2.0.0-beta.1 because gpui still pins both.
 - 2026-10-28: Git changes: a text document that differs from `HEAD` shows a changes toggle (also View > Show Changes and Cmd/Ctrl+Shift+D) that covers the body with gpui-kit's read-only diff, side by side on windows at least 1100 px wide and one column below, and the nearby-files picker marks changed files. Git runs as the `git` binary off the UI thread; no git, no repository, or a failure means no toggle and no markers. Details in [Git diff](git-diff.md).
 - 2026-10-28: View > Diff Layout: Automatic, Side by Side, or Inline, persisted as `diff_layout`.
+- 2026-11-01: SVG images in Markdown documents render through OpenIt's bounded `resvg` path instead of a placeholder: a local SVG reads only its own directory, a remote one reads no local file.

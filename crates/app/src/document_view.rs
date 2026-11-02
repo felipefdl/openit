@@ -2178,8 +2178,7 @@ pub(crate) mod tests {
   use crate::cache::ResourceCacheHandle;
   use crate::fetch::{FakeFetcher, FetchError, Fetcher};
   use crate::image_cache::{
-    DocumentImageCache, Entry, PermissionRequests, PlaceholderKind, released_image_count_for_test,
-    reset_released_image_count_for_test,
+    DocumentImageCache, Entry, PermissionRequests, released_image_count_for_test, reset_released_image_count_for_test,
   };
   use crate::schema_cache::DocumentSchemaCache;
   use gpui_kit::component::highlighter::DiagnosticSeverity;
@@ -5242,25 +5241,23 @@ pub(crate) mod tests {
 
     assert!(matches!(load_image(&view, file.clone(), cx), Some(Ok(_))));
     assert!(matches!(load_image(&view, data.clone(), cx), Some(Ok(_))));
-    assert!(has_entry(&view, &file, cx, |entry| matches!(
-      entry,
-      Entry::Placeholder(PlaceholderKind::Denied(_))
-    )));
-    assert!(has_entry(&view, &data, cx, |entry| matches!(
-      entry,
-      Entry::Placeholder(PlaceholderKind::Denied(_))
-    )));
+    assert!(has_entry(&view, &file, cx, |entry| matches!(entry, Entry::Denied(_))));
+    assert!(has_entry(&view, &data, cx, |entry| matches!(entry, Entry::Denied(_))));
     assert_eq!(fetcher.calls().len(), 0);
   }
 
   #[gpui_kit::test]
-  fn svg_shows_a_placeholder(cx: &mut TestAppContext) {
+  fn a_local_svg_draws_at_its_intrinsic_size(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_settings_dir, _store) = install_globals(cx);
     let doc = tempfile::tempdir().unwrap();
     let path = doc.path().join("doc.md");
     fs::write(&path, "# Images\n").unwrap();
-    fs::write(doc.path().join("logo.svg"), "<svg></svg>").unwrap();
+    fs::write(
+      doc.path().join("logo.svg"),
+      r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><rect width="8" height="4" fill="#e08030"/></svg>"##,
+    )
+    .unwrap();
     let loaded = load_text(&path).unwrap();
     let (view, cx) =
       cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
@@ -5268,11 +5265,46 @@ pub(crate) mod tests {
 
     let _ = load_image(&view, resource.clone(), cx);
     cx.run_until_parked();
-    assert!(matches!(load_image(&view, resource.clone(), cx), Some(Ok(_))));
-    assert!(has_entry(&view, &resource, cx, |entry| matches!(
-      entry,
-      Entry::Placeholder(PlaceholderKind::Svg)
-    )));
+    let Some(Ok(image)) = load_image(&view, resource.clone(), cx) else {
+      panic!("the SVG should draw");
+    };
+    assert_eq!(
+      image.size(0),
+      gpui_kit::size(gpui_kit::DevicePixels(8), gpui_kit::DevicePixels(4))
+    );
+    assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0x30, 0x80, 0xe0, 0xff]);
+    assert!(has_entry(&view, &resource, cx, |entry| matches!(entry, Entry::Ready(_))));
+  }
+
+  #[gpui_kit::test]
+  fn a_remote_svg_cannot_draw_local_files(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_settings_dir, _store) = install_globals(cx);
+    let doc = tempfile::tempdir().unwrap();
+    let path = doc.path().join("doc.md");
+    fs::write(&path, "# Images\n").unwrap();
+    let secret = doc.path().join("secret.png");
+    fs::write(&secret, png(1, 1)).unwrap();
+    let svg = format!(
+      r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><image href="{}" width="1" height="1"/></svg>"#,
+      secret.display()
+    );
+    let url = "https://raw.githubusercontent.com/x.svg";
+    let _fetcher = install_fetcher(HashMap::from([(url.to_owned(), Ok(svg.into_bytes()))]), cx);
+    let loaded = load_text(&path).unwrap();
+    let (view, cx) =
+      cx.add_window_view(|window, cx| DocumentView::open(path.clone(), loaded, SessionId::new(), window, cx));
+    let resource = Resource::Uri(url.into());
+
+    let _ = load_image(&view, resource.clone(), cx);
+    cx.run_until_parked();
+    let _ = load_image(&view, resource.clone(), cx);
+    cx.run_until_parked();
+    let Some(Ok(image)) = load_image(&view, resource.clone(), cx) else {
+      panic!("the remote SVG should draw");
+    };
+    assert!(has_entry(&view, &resource, cx, |entry| matches!(entry, Entry::Ready(_))));
+    assert_eq!(image.as_bytes(0).unwrap()[3], 0, "the local file is not drawn");
   }
 
   #[gpui_kit::test]
@@ -5831,7 +5863,7 @@ pub(crate) mod tests {
     assert!(matches!(load_image(&view, resource.clone(), cx), Some(Ok(_))));
     assert!(has_entry(&view, &resource, cx, |entry| matches!(
       entry,
-      Entry::Placeholder(PlaceholderKind::Denied(DenyReason::NoLocalBase))
+      Entry::Denied(DenyReason::NoLocalBase)
     )));
   }
 
